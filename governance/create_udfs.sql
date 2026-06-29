@@ -21,19 +21,23 @@ CREATE OR REPLACE FUNCTION admin.shared.mask_dob(val DATE)
 RETURNS DATE
 RETURN MAKE_DATE(YEAR(val), 1, 1);
 
--- Age: 10-year bracket. VARIANT input accepts both STRING and INT columns.
+-- Age: generalise to decade. VARIANT input accepts both STRING and INT columns.
+-- INT columns get a numeric decade floor so the value casts back cleanly (35 → 30).
+-- STRING columns get a readable bracket (35 → "30-39").
 -- Returns '[REDACTED]' if value cannot be parsed as a number.
--- 35 → "30-39"
 CREATE OR REPLACE FUNCTION admin.shared.mask_age(val VARIANT)
 RETURNS VARIANT
 RETURN CASE
-  WHEN TRY_CAST(val::STRING AS BIGINT) IS NOT NULL
+  WHEN TRY_CAST(val::STRING AS BIGINT) IS NULL
+    THEN '[REDACTED]'::VARIANT
+  WHEN schema_of_variant(val) = 'STRING'
     THEN CONCAT(
            CAST(FLOOR(TRY_CAST(val::STRING AS BIGINT) / 10) * 10 AS STRING),
            '-',
            CAST(FLOOR(TRY_CAST(val::STRING AS BIGINT) / 10) * 10 + 9 AS STRING)
          )::VARIANT
-  ELSE '[REDACTED]'::VARIANT
+  ELSE
+    CAST(FLOOR(TRY_CAST(val::STRING AS BIGINT) / 10) * 10 AS BIGINT)::VARIANT
 END;
 
 -- IP address: first two octets for IPv4; [REDACTED] for IPv6 or unrecognised format
