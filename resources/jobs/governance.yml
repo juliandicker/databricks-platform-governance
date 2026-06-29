@@ -8,10 +8,6 @@ resources:
         has no reader group grants. Run after every terraform apply and after any
         policy change. Re-runnable from the Databricks UI at any time.
 
-      parameters:
-        - name: exempt_sps
-          default: ""
-
       tasks:
         - task_key: create_udfs
           description: "Create type-specific masking UDFs in admin.shared"
