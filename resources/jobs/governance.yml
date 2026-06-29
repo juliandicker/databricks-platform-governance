@@ -1,0 +1,42 @@
+resources:
+  jobs:
+    governance_setup:
+      name: platform-governance-setup
+      description: >
+        Idempotent platform governance job. Creates masking UDFs in admin.shared,
+        applies catalog-level ABAC policies on silver and gold, and asserts bronze
+        has no reader group grants. Run after every terraform apply and after any
+        policy change. Re-runnable from the Databricks UI at any time.
+
+      run_as:
+        service_principal_name: ${var.platform_sp_id}
+
+      parameters:
+        - name: exempt_sps
+          default: ""
+
+      tasks:
+        - task_key: create_udfs
+          description: "Create type-specific masking UDFs in admin.shared"
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ${workspace.file_path}/governance/create_udfs.sql
+
+        - task_key: create_policies
+          description: "Create catalog-level ABAC policies on silver and gold"
+          depends_on:
+            - task_key: create_udfs
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ${workspace.file_path}/governance/create_policies.sql
+
+        - task_key: verify_bronze
+          description: "Assert no reader group grants exist on bronze"
+          depends_on:
+            - task_key: create_policies
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ${workspace.file_path}/governance/verify_bronze.sql

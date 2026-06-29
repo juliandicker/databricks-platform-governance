@@ -1,0 +1,15 @@
+CREATE OR REPLACE FUNCTION admin.shared.mask_name(val STRING)
+RETURNS STRING
+RETURN '***MASKED***';
+
+CREATE OR REPLACE FUNCTION admin.shared.mask_email(val STRING)
+RETURNS STRING
+RETURN REGEXP_REPLACE(val, '[^@.]', '*');
+
+CREATE OR REPLACE FUNCTION admin.shared.mask_dob(val DATE)
+RETURNS DATE
+RETURN MAKE_DATE(YEAR(val), 1, 1);
+
+CREATE OR REPLACE FUNCTION admin.shared.mask_location(val STRING)
+RETURNS STRING
+RETURN LEFT(REPLACE(TRIM(val), ' ', ''), LENGTH(REPLACE(TRIM(val), ' ', '')) - 3);
