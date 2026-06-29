@@ -15,11 +15,12 @@ RETURN CONCAT(
   REGEXP_EXTRACT(SPLIT(val, '@')[1], '^[^.]+\\.(.+)$', 1)
 );
 
--- Date of birth: truncate to year, preserving DATE type
--- 1985-07-23 → 1985-01-01
+-- Date of birth: truncate to decade of birth, consistent with mask_age 10-year bracket.
+-- Truncating to year would allow exact age derivation, defeating the age generalisation.
+-- 1985-07-23 → 1980-01-01
 CREATE OR REPLACE FUNCTION admin.shared.mask_dob(val DATE)
 RETURNS DATE
-RETURN MAKE_DATE(YEAR(val), 1, 1);
+RETURN MAKE_DATE(CAST(FLOOR(YEAR(val) / 10) * 10 AS INT), 1, 1);
 
 -- Age: generalise to decade. VARIANT input accepts both STRING and INT columns.
 -- INT columns get a numeric decade floor so the value casts back cleanly (35 → 30).
