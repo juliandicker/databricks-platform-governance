@@ -8,9 +8,6 @@ resources:
         has no reader group grants. Run after every terraform apply and after any
         policy change. Re-runnable from the Databricks UI at any time.
 
-      run_as:
-        service_principal_name: ${var.platform_sp_id}
-
       parameters:
         - name: exempt_sps
           default: ""

@@ -6,10 +6,6 @@ variables:
     description: >
       SQL warehouse ID for governance statement execution.
       Injected at deploy time from terraform output team_warehouse_ids.data_platform_admins.
-  platform_sp_id:
-    description: >
-      Application ID of the data platform admin SP.
-      Injected at deploy time from terraform output platform_sp_application_id.
 
 sync:
   exclude:
