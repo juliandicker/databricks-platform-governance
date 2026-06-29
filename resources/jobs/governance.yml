@@ -25,3 +25,12 @@ resources:
             file:
               path: ${workspace.file_path}/governance/create_policies.sql
 
+        - task_key: grant_governed_tags
+          description: "Grant ASSIGN on all GDPR + PCI DSS governed tags to team SPs and data stewards"
+          depends_on:
+            - task_key: create_policies
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ${workspace.file_path}/governance/grant_governed_tags.sql
+
