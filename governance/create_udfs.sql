@@ -56,13 +56,19 @@ CREATE OR REPLACE FUNCTION admin.shared.mask_credit_card(val STRING)
 RETURNS STRING
 RETURN CONCAT('**** **** **** ', RIGHT(REGEXP_REPLACE(val, '[^0-9]', ''), 4));
 
--- Phone: preserve country code only; [REDACTED] if no E.164 country code detected
+-- Phone: preserve country code only; [REDACTED] if no country code detected.
+-- Handles E.164 (+44) and international dialling prefix (0044) formats.
+-- Note: without a space after the country code the greedy match may include
+-- 1-2 extra digits (e.g. +447... → +447); acceptable in a masking context.
 -- +44 7911 123456 → +44 *** *** ****
+-- 0044 7911 123456 → +44 *** *** ****
 CREATE OR REPLACE FUNCTION admin.shared.mask_phone(val STRING)
 RETURNS STRING
 RETURN CASE
   WHEN TRIM(val) RLIKE '^\\+[0-9]'
     THEN CONCAT(REGEXP_EXTRACT(TRIM(val), '^(\\+[0-9]{1,3})', 1), ' *** *** ****')
+  WHEN TRIM(val) RLIKE '^00[0-9]'
+    THEN CONCAT('+', REGEXP_EXTRACT(TRIM(val), '^00([0-9]{1,3})', 1), ' *** *** ****')
   ELSE '[REDACTED]'
 END;
 
