@@ -6,9 +6,29 @@
 -- Multiple policies must not match the same column for the same user — Databricks
 -- returns an error rather than picking one. Tags are partitioned across policies
 -- so each class.* tag appears in exactly one MATCH COLUMNS condition.
+--
+-- has_tag() requires a fully qualified tag name — namespace wildcards (has_tag('class'))
+-- are not supported and cause a compile error.
 
 -- ── silver ────────────────────────────────────────────────────────────────────
 
+-- Identifiers and special-category strings → [REDACTED]
+CREATE OR REPLACE POLICY mask_name_columns
+ON CATALOG silver
+COLUMN MASK admin.shared.mask_sensitive
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+FOR TABLES MATCH COLUMNS (
+  has_tag('class.name')               OR has_tag('class.vin')                    OR
+  has_tag('class.driver_license')     OR has_tag('class.us_driver_license')      OR
+  has_tag('class.passport')           OR has_tag('class.us_passport')            OR
+  has_tag('class.us_ssn')             OR
+  has_tag('class.uk_nino')            OR has_tag('class.uk_nhs')                 OR
+  has_tag('class.de_id_card')         OR has_tag('class.de_svnr')                OR has_tag('class.de_tax_id') OR
+  has_tag('class.iban_code')          OR has_tag('class.us_bank_number')         OR
+  has_tag('class.ethnicity')          OR has_tag('class.marital_status')         OR
+  has_tag('class.sexual_orientation') OR has_tag('class.criminal_background')
+) AS c ON COLUMN c;
+
 CREATE OR REPLACE POLICY mask_email_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_email
@@ -50,35 +70,25 @@ ON CATALOG silver
 COLUMN MASK admin.shared.mask_location
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
 FOR TABLES MATCH COLUMNS has_tag('class.location') AS c ON COLUMN c;
-
--- Catch-all for any class.* tag not covered above.
--- has_tag('class') without an attribute should match any column carrying any class.* tag.
--- If this syntax is unsupported by the current runtime, this policy silently matches nothing —
--- newly detected tags will be unprotected until an explicit policy is added for them.
-CREATE OR REPLACE POLICY mask_unknown_sensitive_columns
-ON CATALOG silver
-COLUMN MASK admin.shared.mask_sensitive
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
-FOR TABLES MATCH COLUMNS (
-  has_tag('class') AND NOT (
-    has_tag('class.name')               OR has_tag('class.vin')                    OR
-    has_tag('class.driver_license')     OR has_tag('class.us_driver_license')      OR
-    has_tag('class.passport')           OR has_tag('class.us_passport')            OR
-    has_tag('class.us_ssn')             OR
-    has_tag('class.uk_nino')            OR has_tag('class.uk_nhs')                 OR
-    has_tag('class.de_id_card')         OR has_tag('class.de_svnr')                OR has_tag('class.de_tax_id') OR
-    has_tag('class.iban_code')          OR has_tag('class.us_bank_number')         OR
-    has_tag('class.ethnicity')          OR has_tag('class.marital_status')         OR
-    has_tag('class.sexual_orientation') OR has_tag('class.criminal_background')    OR
-    has_tag('class.email_address')      OR has_tag('class.date_of_birth')          OR
-    has_tag('class.age')                OR has_tag('class.ip_address')             OR
-    has_tag('class.credit_card')        OR has_tag('class.phone_number')           OR
-    has_tag('class.location')
-  )
-) AS c ON COLUMN c;
 
 -- ── gold ──────────────────────────────────────────────────────────────────────
 
+CREATE OR REPLACE POLICY mask_name_columns
+ON CATALOG gold
+COLUMN MASK admin.shared.mask_sensitive
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+FOR TABLES MATCH COLUMNS (
+  has_tag('class.name')               OR has_tag('class.vin')                    OR
+  has_tag('class.driver_license')     OR has_tag('class.us_driver_license')      OR
+  has_tag('class.passport')           OR has_tag('class.us_passport')            OR
+  has_tag('class.us_ssn')             OR
+  has_tag('class.uk_nino')            OR has_tag('class.uk_nhs')                 OR
+  has_tag('class.de_id_card')         OR has_tag('class.de_svnr')                OR has_tag('class.de_tax_id') OR
+  has_tag('class.iban_code')          OR has_tag('class.us_bank_number')         OR
+  has_tag('class.ethnicity')          OR has_tag('class.marital_status')         OR
+  has_tag('class.sexual_orientation') OR has_tag('class.criminal_background')
+) AS c ON COLUMN c;
+
 CREATE OR REPLACE POLICY mask_email_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_email
@@ -121,24 +131,3 @@ COLUMN MASK admin.shared.mask_location
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
 FOR TABLES MATCH COLUMNS has_tag('class.location') AS c ON COLUMN c;
 
-CREATE OR REPLACE POLICY mask_unknown_sensitive_columns
-ON CATALOG gold
-COLUMN MASK admin.shared.mask_sensitive
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
-FOR TABLES MATCH COLUMNS (
-  has_tag('class') AND NOT (
-    has_tag('class.name')               OR has_tag('class.vin')                    OR
-    has_tag('class.driver_license')     OR has_tag('class.us_driver_license')      OR
-    has_tag('class.passport')           OR has_tag('class.us_passport')            OR
-    has_tag('class.us_ssn')             OR
-    has_tag('class.uk_nino')            OR has_tag('class.uk_nhs')                 OR
-    has_tag('class.de_id_card')         OR has_tag('class.de_svnr')                OR has_tag('class.de_tax_id') OR
-    has_tag('class.iban_code')          OR has_tag('class.us_bank_number')         OR
-    has_tag('class.ethnicity')          OR has_tag('class.marital_status')         OR
-    has_tag('class.sexual_orientation') OR has_tag('class.criminal_background')    OR
-    has_tag('class.email_address')      OR has_tag('class.date_of_birth')          OR
-    has_tag('class.age')                OR has_tag('class.ip_address')             OR
-    has_tag('class.credit_card')        OR has_tag('class.phone_number')           OR
-    has_tag('class.location')
-  )
-) AS c ON COLUMN c;
