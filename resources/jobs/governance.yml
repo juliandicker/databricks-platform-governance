@@ -3,12 +3,9 @@ resources:
     governance_setup:
       name: platform-governance-setup
       description: >
-        Idempotent platform governance job. Creates masking UDFs in admin.shared,
-        applies catalog-level ABAC policies on silver and gold, sweeps managed tables
-        for Auto TTL (DELETE ROWS 0 DAYS AFTER _delete_at), and creates the
-        admin.shared.retention_compliance view for dashboard consumption.
-        Run after every terraform apply and after any policy change.
-        Re-runnable from the Databricks UI at any time.
+        Runs on every CI deploy. Creates masking UDFs in admin.shared and
+        applies catalog-level ABAC policies on silver and gold.
+        Idempotent (CREATE OR REPLACE) — safe to re-run manually at any time.
 
       tasks:
         - task_key: create_udfs
@@ -27,22 +24,32 @@ resources:
             file:
               path: ${workspace.file_path}/governance/create_policies.sql
 
+    governance_daily:
+      name: platform-governance-daily
+      description: >
+        Scheduled daily monitoring job. Applies Auto TTL to tables with a
+        _delete_at column, computes freshness metrics, and rebuilds the
+        admin.shared.retention_compliance view. Paused by default in demo
+        environments — unpause in the Databricks UI when needed.
+
+      schedule:
+        quartz_cron_expression: "0 0 1 * * ?"
+        timezone_id: "Europe/London"
+        pause_status: PAUSED
+
+      tasks:
         - task_key: apply_auto_ttl
-          description: "Apply Auto TTL to all managed bronze/silver/gold tables that have a _delete_at column"
-          depends_on:
-            - task_key: create_policies
+          description: "Apply Auto TTL to all managed tables that have a _delete_at column"
           notebook_task:
             notebook_path: ${workspace.file_path}/governance/apply_auto_ttl
 
         - task_key: compute_freshness_metrics
           description: "Compute MAX(_updated_at) per table and write to admin.shared.freshness_metrics"
-          depends_on:
-            - task_key: create_policies
           notebook_task:
             notebook_path: ${workspace.file_path}/governance/compute_freshness_metrics
 
         - task_key: create_retention_compliance_view
-          description: "Create admin.shared.retention_compliance view covering retention and freshness compliance"
+          description: "Rebuild admin.shared.retention_compliance view with latest retention and freshness data"
           depends_on:
             - task_key: apply_auto_ttl
             - task_key: compute_freshness_metrics
@@ -50,5 +57,3 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: ${workspace.file_path}/governance/create_retention_compliance_view.sql
-
-
