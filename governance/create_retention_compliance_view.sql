@@ -40,6 +40,7 @@ LEFT JOIN all_columns c
   AND c.column_name   = '_delete_at'
 WHERE t.table_schema NOT IN ('information_schema')
   AND t.table_type = 'MANAGED'
+  AND NOT STARTSWITH(t.table_name, '_')   -- excludes monitoring (_drift_metrics, _profile_metrics) and materialization (__materialization_mat_*) tables
 ORDER BY retention_status DESC, t.table_catalog, t.table_schema, t.table_name;
 
 -- Grant read access so the dashboard and all workspace users can query this view.
