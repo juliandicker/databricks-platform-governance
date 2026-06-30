@@ -5,7 +5,9 @@ variables:
   warehouse_id:
     description: >
       SQL warehouse ID for governance statement execution.
-      Injected at deploy time from terraform output team_warehouse_ids.data_platform_admins.
+      Resolved by name lookup — data_platform_admins-sql-warehouse is created by Terraform.
+    lookup:
+      warehouse: data_platform_admins-sql-warehouse
 
 sync:
   exclude:
