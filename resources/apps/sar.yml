@@ -1,0 +1,25 @@
+resources:
+  apps:
+    sar_app:
+      name: "platform-sar-app"
+      description: >
+        GDPR Subject Access Request search. Searches all class.*-tagged columns
+        in silver for a given identifier. Lineage section shows downstream
+        gold/bronze tables via system.access.table_lineage.
+        Restricted to data stewards and platform admins.
+      source_code_path: ../../apps/sar_app
+
+      resources:
+        - name: "sql-warehouse"
+          sql_warehouse:
+            id: ${var.warehouse_id}
+            permission: "CAN_USE"
+
+      user_api_scopes:
+        - sql
+
+      permissions:
+        - level: CAN_USE
+          group_name: sg-dbplat-data-stewards
+        - level: CAN_MANAGE
+          group_name: sg-dbplat-data-platform-admins
