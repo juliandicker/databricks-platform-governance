@@ -4,9 +4,11 @@ resources:
       name: platform-governance-setup
       description: >
         Idempotent platform governance job. Creates masking UDFs in admin.shared,
-        applies catalog-level ABAC policies on silver and gold, and asserts bronze
-        has no reader group grants. Run after every terraform apply and after any
-        policy change. Re-runnable from the Databricks UI at any time.
+        applies catalog-level ABAC policies on silver and gold, sweeps managed tables
+        for Auto TTL (DELETE ROWS 0 DAYS AFTER _delete_at), and creates the
+        admin.shared.retention_compliance view for dashboard consumption.
+        Run after every terraform apply and after any policy change.
+        Re-runnable from the Databricks UI at any time.
 
       tasks:
         - task_key: create_udfs
@@ -24,5 +26,21 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: ${workspace.file_path}/governance/create_policies.sql
+
+        - task_key: apply_auto_ttl
+          description: "Apply Auto TTL to all managed silver/gold tables that have a _delete_at column"
+          depends_on:
+            - task_key: create_policies
+          notebook_task:
+            notebook_path: ${workspace.file_path}/governance/apply_auto_ttl
+
+        - task_key: create_retention_compliance_view
+          description: "Create admin.shared.retention_compliance view for dashboard consumption"
+          depends_on:
+            - task_key: apply_auto_ttl
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ${workspace.file_path}/governance/create_retention_compliance_view.sql
 
 
