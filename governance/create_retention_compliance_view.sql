@@ -32,9 +32,10 @@ WITH compliance AS (
   WHERE t.table_catalog IN ('bronze', 'silver', 'gold')
     AND t.table_schema NOT IN ('information_schema')
     AND t.table_type = 'MANAGED'
-    AND NOT STARTSWITH(t.table_name, '_')
-    AND NOT ENDSWITH(t.table_name, '_drift_metrics')
-    AND NOT ENDSWITH(t.table_name, '_profile_metrics')
+    AND t.table_name NOT LIKE '\_%'
+    AND t.table_name NOT LIKE '%\_drift\_metrics'
+    AND t.table_name NOT LIKE '%\_profile\_metrics'
+    AND t.table_name NOT LIKE 'event_log_%'
   GROUP BY t.table_catalog, t.table_schema, t.table_name
 )
 
