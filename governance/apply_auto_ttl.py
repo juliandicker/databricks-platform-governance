@@ -16,9 +16,6 @@ tables = spark.sql("""
     WHERE  table_catalog IN ('bronze', 'silver', 'gold')
       AND  column_name   = '_delete_at'
       AND  table_schema != 'information_schema'
-      AND  NOT STARTSWITH(table_name, '_')
-      AND  NOT ENDSWITH(table_name, '_drift_metrics')
-      AND  NOT ENDSWITH(table_name, '_profile_metrics')
 """).collect()
 
 for row in tables:
