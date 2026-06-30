@@ -1,10 +1,14 @@
 -- Governance compliance view — exposed via admin.shared for dashboard consumption.
 -- Shows every managed table in bronze, silver, and gold with:
---   retention_status  — COMPLIANT if _delete_at column is present
+--   insertion_status  — COMPLIANT if _inserted_at column is present
 --   freshness_status  — COMPLIANT if _updated_at column is present
+--   retention_status  — COMPLIANT if _delete_at column is present
 --   max_updated_at    — actual MAX(_updated_at) from admin.shared.freshness_metrics
 --
--- Teams are responsible for populating _delete_at and _updated_at on every row.
+-- Teams are responsible for populating all three metadata columns on every row:
+--   _inserted_at  TIMESTAMP  — set once on first insert, never updated
+--   _updated_at   TIMESTAMP  — set on every write
+--   _delete_at    TIMESTAMP  — set to the row's expiry date (drives Auto TTL)
 -- Structural compliance (column presence) is checked via information_schema.
 -- Actual freshness (max_updated_at) is computed by the compute_freshness_metrics job task.
 
@@ -16,14 +20,15 @@ WITH compliance AS (
     t.table_schema,
     t.table_name,
     CONCAT(t.table_catalog, '.', t.table_schema, '.', t.table_name) AS full_table_name,
-    MAX(CASE WHEN c.column_name = '_delete_at'  THEN TRUE ELSE FALSE END) AS has_delete_at,
-    MAX(CASE WHEN c.column_name = '_updated_at' THEN TRUE ELSE FALSE END) AS has_updated_at
+    MAX(CASE WHEN c.column_name = '_inserted_at' THEN TRUE ELSE FALSE END) AS has_inserted_at,
+    MAX(CASE WHEN c.column_name = '_updated_at'  THEN TRUE ELSE FALSE END) AS has_updated_at,
+    MAX(CASE WHEN c.column_name = '_delete_at'   THEN TRUE ELSE FALSE END) AS has_delete_at
   FROM system.information_schema.tables t
   LEFT JOIN system.information_schema.columns c
     ON  t.table_catalog = c.table_catalog
     AND t.table_schema  = c.table_schema
     AND t.table_name    = c.table_name
-    AND c.column_name   IN ('_delete_at', '_updated_at')
+    AND c.column_name   IN ('_inserted_at', '_updated_at', '_delete_at')
   WHERE t.table_catalog IN ('bronze', 'silver', 'gold')
     AND t.table_schema NOT IN ('information_schema')
     AND t.table_type = 'MANAGED'
@@ -38,16 +43,18 @@ SELECT
   c.table_schema,
   c.table_name,
   c.full_table_name,
-  CASE WHEN c.has_delete_at  THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS retention_status,
-  CASE WHEN c.has_updated_at THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS freshness_status,
-  c.has_delete_at,
+  CASE WHEN c.has_inserted_at THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS insertion_status,
+  CASE WHEN c.has_updated_at  THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS freshness_status,
+  CASE WHEN c.has_delete_at   THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS retention_status,
+  c.has_inserted_at,
   c.has_updated_at,
+  c.has_delete_at,
   f.max_updated_at,
   f.error AS freshness_error
 FROM compliance c
 LEFT JOIN admin.shared.freshness_metrics f ON c.full_table_name = f.full_table_name
 ORDER BY
-  CASE WHEN NOT c.has_delete_at OR NOT c.has_updated_at THEN 0 ELSE 1 END,
+  CASE WHEN NOT c.has_inserted_at OR NOT c.has_updated_at OR NOT c.has_delete_at THEN 0 ELSE 1 END,
   c.table_catalog, c.table_schema, c.table_name;
 
 -- Grant read access so the dashboard and all workspace users can query this view.
