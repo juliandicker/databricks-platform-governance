@@ -8,25 +8,25 @@
 
 # COMMAND ----------
 
-layers = ["silver", "gold"]
 applied, skipped_error = [], []
 
-for layer in layers:
-    tables = spark.sql(f"""
-        SELECT CONCAT(table_catalog, '.', table_schema, '.', table_name) AS full_name
-        FROM   {layer}.information_schema.columns
-        WHERE  column_name  = '_delete_at'
-          AND  table_schema != 'information_schema'
-    """).collect()
+tables = spark.sql("""
+    SELECT CONCAT(table_catalog, '.', table_schema, '.', table_name) AS full_name
+    FROM   system.information_schema.columns
+    WHERE  table_catalog IN ('silver', 'gold')
+      AND  column_name   = '_delete_at'
+      AND  table_schema != 'information_schema'
+      AND  NOT STARTSWITH(table_name, '_')
+""").collect()
 
-    for row in tables:
-        try:
-            spark.sql(f"ALTER TABLE {row.full_name} DELETE ROWS 0 DAYS AFTER _delete_at")
-            applied.append(row.full_name)
-            print(f"[OK]   {row.full_name}")
-        except Exception as exc:
-            skipped_error.append((row.full_name, str(exc)))
-            print(f"[FAIL] {row.full_name}: {exc}")
+for row in tables:
+    try:
+        spark.sql(f"ALTER TABLE {row.full_name} DELETE ROWS 0 DAYS AFTER _delete_at")
+        applied.append(row.full_name)
+        print(f"[OK]   {row.full_name}")
+    except Exception as exc:
+        skipped_error.append((row.full_name, str(exc)))
+        print(f"[FAIL] {row.full_name}: {exc}")
 
 # COMMAND ----------
 
