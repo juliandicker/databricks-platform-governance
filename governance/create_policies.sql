@@ -12,7 +12,7 @@
 -- Identifiers and special-category strings → [REDACTED]
 CREATE OR REPLACE POLICY mask_name_columns
 ON CATALOG silver
-COLUMN MASK admin.shared.mask_name
+COLUMN MASK admin.shared.mask_sensitive
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
 FOR TABLES MATCH COLUMNS (
   has_tag('class.name')               OR has_tag('class.vin')                    OR
@@ -98,7 +98,7 @@ FOR TABLES MATCH COLUMNS (
 
 CREATE OR REPLACE POLICY mask_name_columns
 ON CATALOG gold
-COLUMN MASK admin.shared.mask_name
+COLUMN MASK admin.shared.mask_sensitive
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
 FOR TABLES MATCH COLUMNS (
   has_tag('class.name')               OR has_tag('class.vin')                    OR

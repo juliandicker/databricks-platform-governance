@@ -1,8 +1,3 @@
--- Generic string redaction — names, document IDs, special category data
-CREATE OR REPLACE FUNCTION admin.shared.mask_name(val STRING)
-RETURNS STRING
-RETURN '[REDACTED]';
-
 -- Email: mask local part and domain label, preserve TLD for structural context
 -- julian@redkic.co.uk → ******@******.co.uk
 CREATE OR REPLACE FUNCTION admin.shared.mask_email(val STRING)
