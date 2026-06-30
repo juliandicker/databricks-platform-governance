@@ -65,3 +65,9 @@ resources:
           dashboard_task:
             dashboard_id: ${resources.dashboards.platform_governance.id}
             warehouse_id: ${var.warehouse_id}
+
+        - task_key: refresh_access_audit_dashboard
+          description: "Refresh the Platform Access Audit dashboard from system.access.audit"
+          dashboard_task:
+            dashboard_id: ${resources.dashboards.access_audit.id}
+            warehouse_id: ${var.warehouse_id}
