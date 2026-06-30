@@ -1,16 +1,20 @@
 -- Governance compliance view — exposed via admin.shared for dashboard consumption.
 -- Shows every managed table in bronze, silver, and gold with:
---   insertion_status  — COMPLIANT if _inserted_at column is present
---   freshness_status  — COMPLIANT if _updated_at column is present
---   retention_status  — COMPLIANT if _delete_at column is present
---   max_updated_at    — actual MAX(_updated_at) from admin.shared.freshness_metrics
+--   insertion_status      — COMPLIANT if _inserted_at column is present
+--   freshness_status      — COMPLIANT if _updated_at column is present
+--   retention_status      — COMPLIANT if _delete_at column is present
+--   sla_status            — FRESH / STALE / NEVER_UPDATED / NO_COLUMN / ERROR
+--   freshness_sla         — raw SLA string from TBLPROPERTIES e.g. '1h', '7d'
+--   freshness_sla_minutes — SLA in minutes; default 1440 (24h) if not set
+--   max_updated_at        — actual MAX(_updated_at) from admin.shared.freshness_metrics
 --
--- Teams are responsible for populating all three metadata columns on every row:
---   _inserted_at  TIMESTAMP  — set once on first insert, never updated
---   _updated_at   TIMESTAMP  — set on every write
---   _delete_at    TIMESTAMP  — set to the row's expiry date (drives Auto TTL)
--- Structural compliance (column presence) is checked via information_schema.
--- Actual freshness (max_updated_at) is computed by the compute_freshness_metrics job task.
+-- Teams set the SLA per table via:
+--   ALTER TABLE <catalog>.<schema>.<table>
+--   SET TBLPROPERTIES ('platform.freshness_sla' = '1h');
+--
+-- Supported units: m (minutes), h (hours), d (days), y (years).
+-- Examples: '30m', '4h', '1d', '7d', '30d', '1y', '10y'. Default: '1d'.
+-- Table properties are visible in the Unity Catalog Explorer — Details tab.
 
 CREATE OR REPLACE VIEW admin.shared.retention_compliance AS
 
@@ -47,15 +51,36 @@ SELECT
   CASE WHEN c.has_inserted_at THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS insertion_status,
   CASE WHEN c.has_updated_at  THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS freshness_status,
   CASE WHEN c.has_delete_at   THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS retention_status,
+  CASE
+    WHEN NOT c.has_updated_at                    THEN 'NO_COLUMN'
+    WHEN f.error IS NOT NULL                     THEN 'ERROR'
+    WHEN f.max_updated_at IS NULL                THEN 'NEVER_UPDATED'
+    WHEN TIMESTAMPDIFF(MINUTE, f.max_updated_at, CURRENT_TIMESTAMP())
+         > COALESCE(f.freshness_sla_minutes, 1440) THEN 'STALE'
+    ELSE                                              'FRESH'
+  END AS sla_status,
   c.has_inserted_at,
   c.has_updated_at,
   c.has_delete_at,
+  COALESCE(f.freshness_sla, '1d')            AS freshness_sla,
+  COALESCE(f.freshness_sla_minutes, 1440)    AS freshness_sla_minutes,
   f.max_updated_at,
   f.error AS freshness_error
 FROM compliance c
 LEFT JOIN admin.shared.freshness_metrics f ON c.full_table_name = f.full_table_name
 ORDER BY
-  CASE WHEN NOT c.has_inserted_at OR NOT c.has_updated_at OR NOT c.has_delete_at THEN 0 ELSE 1 END,
+  CASE
+    WHEN NOT c.has_inserted_at OR NOT c.has_updated_at OR NOT c.has_delete_at THEN 0
+    WHEN CASE
+           WHEN NOT c.has_updated_at         THEN 'NO_COLUMN'
+           WHEN f.error IS NOT NULL          THEN 'ERROR'
+           WHEN f.max_updated_at IS NULL     THEN 'NEVER_UPDATED'
+           WHEN TIMESTAMPDIFF(MINUTE, f.max_updated_at, CURRENT_TIMESTAMP())
+                > COALESCE(f.freshness_sla_minutes, 1440) THEN 'STALE'
+           ELSE 'FRESH'
+         END IN ('STALE', 'NEVER_UPDATED', 'ERROR') THEN 0
+    ELSE 1
+  END,
   c.table_catalog, c.table_schema, c.table_name;
 
 -- Grant read access so the dashboard and all workspace users can query this view.
