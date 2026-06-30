@@ -26,6 +26,24 @@ TAG_MAP = {
     "Postcode / Location": "class.location",
 }
 
+# Tags that use LIKE containment search instead of exact equality.
+# Names may be stored without honorifics, in different order, or split
+# across first_name/last_name columns — partial matching is more reliable.
+LIKE_TAGS = {"class.name", "class.location"}
+
+# Honorifics to strip before a name search so "Mr Tom Hill" → "Tom Hill"
+_HONORIFICS = {"mr", "mrs", "ms", "miss", "dr", "prof", "sir", "mx", "rev", "lord", "lady"}
+
+
+def clean_search_value(tag: str, val: str) -> str:
+    """Strip honorifics from name searches; leave other values unchanged."""
+    if tag != "class.name":
+        return val
+    parts = val.strip().split()
+    if parts and parts[0].lower().rstrip(".") in _HONORIFICS:
+        parts = parts[1:]
+    return " ".join(parts)
+
 # ---------------------------------------------------------------------------
 # Database helpers
 # ---------------------------------------------------------------------------
@@ -72,17 +90,24 @@ def search_silver_table(
     token: str,
     schema: str,
     table: str,
-    conditions: list[tuple[str, str]],
+    conditions: list[tuple[str, str, str]],  # (column, value, tag)
 ) -> pd.DataFrame:
     """
-    Run a SELECT on silver.<schema>.<table> ANDing all (column, value) conditions.
+    Run a SELECT on silver.<schema>.<table> ANDing all (column, value, tag) conditions.
+    Name and location tags use LIKE containment; all others use exact equality.
     Returns up to 100 matching rows.
     """
-    clauses = " AND ".join(
-        f"LOWER(CAST(`{col}` AS STRING)) = LOWER('{val.replace(chr(39), chr(39)*2)}')"
-        for col, val in conditions
+    clauses = []
+    for col, val, tag in conditions:
+        safe = val.replace("'", "''")
+        if tag in LIKE_TAGS:
+            clauses.append(f"LOWER(CAST(`{col}` AS STRING)) LIKE LOWER('%{safe}%')")
+        else:
+            clauses.append(f"LOWER(CAST(`{col}` AS STRING)) = LOWER('{safe}')")
+    return _query(
+        token,
+        f"SELECT * FROM silver.`{schema}`.`{table}` WHERE {' AND '.join(clauses)} LIMIT 100",
     )
-    return _query(token, f"SELECT * FROM silver.`{schema}`.`{table}` WHERE {clauses} LIMIT 100")
 
 
 def get_downstream_tables(token: str, source_tables: list[str]) -> pd.DataFrame:
@@ -200,7 +225,7 @@ for i, ((schema, table), group) in enumerate(table_list):
     # Find which of the user-selected tags this table actually has
     available = {row.tag_name: row.column_name for _, row in group.iterrows()}
     conditions = [
-        (available[tag], val)
+        (available[tag], clean_search_value(tag, val), tag)
         for tag, val in selected.items()
         if tag in available
     ]
