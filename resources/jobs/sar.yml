@@ -1,0 +1,23 @@
+resources:
+  jobs:
+    sar_search:
+      name: platform-sar-search
+      description: >
+        GDPR Subject Access Request (SAR) search. Scans every PII-tagged column
+        in silver and gold (identified via class.* governed tags) for the given
+        identifier. Trigger manually from the Databricks UI — set the identifier
+        parameter to the value to find (e.g. an email address).
+        Results are appended to admin.shared.sar_results, readable only by
+        sg-dbplat-data-stewards.
+
+      parameters:
+        - name: identifier
+          default: ""
+        - name: request_id
+          default: ""
+
+      tasks:
+        - task_key: sar_search
+          description: "Search all PII-tagged columns in silver and gold for the identifier"
+          notebook_task:
+            notebook_path: ${workspace.file_path}/governance/sar_search
