@@ -9,22 +9,6 @@
 
 CREATE OR REPLACE VIEW admin.shared.retention_compliance AS
 
-WITH all_tables AS (
-  SELECT table_catalog, table_schema, table_name, table_type FROM bronze.information_schema.tables
-  UNION ALL
-  SELECT table_catalog, table_schema, table_name, table_type FROM silver.information_schema.tables
-  UNION ALL
-  SELECT table_catalog, table_schema, table_name, table_type FROM gold.information_schema.tables
-),
-
-all_columns AS (
-  SELECT table_catalog, table_schema, table_name, column_name FROM bronze.information_schema.columns
-  UNION ALL
-  SELECT table_catalog, table_schema, table_name, column_name FROM silver.information_schema.columns
-  UNION ALL
-  SELECT table_catalog, table_schema, table_name, column_name FROM gold.information_schema.columns
-)
-
 SELECT
   t.table_catalog,
   t.table_schema,
@@ -32,13 +16,14 @@ SELECT
   CONCAT(t.table_catalog, '.', t.table_schema, '.', t.table_name) AS full_table_name,
   CASE WHEN c.column_name IS NOT NULL THEN 'COMPLIANT' ELSE 'NON-COMPLIANT' END AS retention_status,
   c.column_name IS NOT NULL AS has_delete_at
-FROM all_tables t
-LEFT JOIN all_columns c
+FROM system.information_schema.tables t
+LEFT JOIN system.information_schema.columns c
   ON  t.table_catalog = c.table_catalog
   AND t.table_schema  = c.table_schema
   AND t.table_name    = c.table_name
   AND c.column_name   = '_delete_at'
-WHERE t.table_schema NOT IN ('information_schema')
+WHERE t.table_catalog IN ('bronze', 'silver', 'gold')
+  AND t.table_schema NOT IN ('information_schema')
   AND t.table_type = 'MANAGED'
   AND NOT STARTSWITH(t.table_name, '_')   -- excludes monitoring (_drift_metrics, _profile_metrics) and materialization (__materialization_mat_*) tables
 ORDER BY retention_status DESC, t.table_catalog, t.table_schema, t.table_name;
