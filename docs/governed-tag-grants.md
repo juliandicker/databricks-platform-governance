@@ -54,4 +54,4 @@ When a new team is added and `terraform apply` runs, the new SP joins `sg-dbplat
 
 ## Why this cannot be automated
 
-The Unity Catalog REST API endpoint for governed tag permissions (`PATCH /api/2.1/unity-catalog/permissions/tag/{name}`) does not accept OIDC-derived tokens. The grants must be applied interactively by a user with metastore admin rights.
+Databricks has not implemented governed tag permission management in either the Unity Catalog REST API or the Databricks SDK. There is no programmatic way to grant or revoke `ASSIGN` on governed tags — the grants must be applied manually by a user with metastore admin rights via the Catalog Explorer UI.
