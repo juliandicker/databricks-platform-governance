@@ -1,0 +1,6 @@
+resources:
+  dashboards:
+    platform_governance:
+      display_name: "Platform Data Governance"
+      file_path: ../../dashboards/Platform Data Governance.lvdash.json
+      embed_credentials: false

@@ -21,3 +21,4 @@ targets:
 
 include:
   - resources/jobs/*.yml
+  - resources/dashboards/*.yml
