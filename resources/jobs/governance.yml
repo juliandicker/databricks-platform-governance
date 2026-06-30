@@ -57,3 +57,11 @@ resources:
             warehouse_id: ${var.warehouse_id}
             file:
               path: ${workspace.file_path}/governance/create_retention_compliance_view.sql
+
+        - task_key: refresh_dashboard
+          description: "Refresh the Platform Data Governance dashboard with latest compliance data"
+          depends_on:
+            - task_key: create_retention_compliance_view
+          dashboard_task:
+            dashboard_id: ${resources.dashboards.platform_governance.id}
+            warehouse_id: ${var.warehouse_id}
