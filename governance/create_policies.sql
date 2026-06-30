@@ -19,12 +19,9 @@ COLUMN MASK admin.shared.mask_sensitive
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
 FOR TABLES MATCH COLUMNS (
   has_tag('class.name')               OR has_tag('class.vin')                    OR
-  has_tag('class.driver_license')     OR has_tag('class.us_driver_license')      OR
-  has_tag('class.passport')           OR has_tag('class.us_passport')            OR
-  has_tag('class.us_ssn')             OR
+  has_tag('class.driver_license')     OR has_tag('class.passport')               OR
   has_tag('class.uk_nino')            OR has_tag('class.uk_nhs')                 OR
-  has_tag('class.de_id_card')         OR has_tag('class.de_svnr')                OR has_tag('class.de_tax_id') OR
-  has_tag('class.iban_code')          OR has_tag('class.us_bank_number')         OR
+  has_tag('class.iban_code')          OR
   has_tag('class.ethnicity')          OR has_tag('class.marital_status')         OR
   has_tag('class.sexual_orientation') OR has_tag('class.criminal_background')
 ) AS c ON COLUMN c;
@@ -79,12 +76,9 @@ COLUMN MASK admin.shared.mask_sensitive
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
 FOR TABLES MATCH COLUMNS (
   has_tag('class.name')               OR has_tag('class.vin')                    OR
-  has_tag('class.driver_license')     OR has_tag('class.us_driver_license')      OR
-  has_tag('class.passport')           OR has_tag('class.us_passport')            OR
-  has_tag('class.us_ssn')             OR
+  has_tag('class.driver_license')     OR has_tag('class.passport')               OR
   has_tag('class.uk_nino')            OR has_tag('class.uk_nhs')                 OR
-  has_tag('class.de_id_card')         OR has_tag('class.de_svnr')                OR has_tag('class.de_tax_id') OR
-  has_tag('class.iban_code')          OR has_tag('class.us_bank_number')         OR
+  has_tag('class.iban_code')          OR
   has_tag('class.ethnicity')          OR has_tag('class.marital_status')         OR
   has_tag('class.sexual_orientation') OR has_tag('class.criminal_background')
 ) AS c ON COLUMN c;
