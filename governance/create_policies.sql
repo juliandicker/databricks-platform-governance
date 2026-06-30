@@ -13,7 +13,7 @@
 -- ── silver ────────────────────────────────────────────────────────────────────
 
 -- Identifiers and special-category strings → [REDACTED]
-CREATE OR REPLACE POLICY mask_name_columns
+CREATE OR REPLACE POLICY mask_sensitive_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_sensitive
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
@@ -73,7 +73,7 @@ FOR TABLES MATCH COLUMNS has_tag('class.location') AS c ON COLUMN c;
 
 -- ── gold ──────────────────────────────────────────────────────────────────────
 
-CREATE OR REPLACE POLICY mask_name_columns
+CREATE OR REPLACE POLICY mask_sensitive_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_sensitive
 TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
