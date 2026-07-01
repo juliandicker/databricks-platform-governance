@@ -14,6 +14,7 @@ logic lives in the supporting modules:
 from __future__ import annotations
 
 import os
+from datetime import date
 
 import pandas as pd
 import streamlit as st
@@ -78,9 +79,17 @@ with st.sidebar:
     for label, tag in TAG_MAP.items():
         if st.checkbox(label, value=(label == "Email")):
             if label == "Date of Birth":
+                today = date.today()
+                try:
+                    min_dob = today.replace(year=today.year - 100)
+                except ValueError:
+                    # today is 29 Feb and year-100 isn't a leap year
+                    min_dob = today.replace(year=today.year - 100, day=28)
                 dob_val = st.date_input(
                     label,
                     value=None,
+                    min_value=min_dob,
+                    max_value=today,
                     key=f"input_{label}",
                     label_visibility="collapsed",
                     format="DD/MM/YYYY",
