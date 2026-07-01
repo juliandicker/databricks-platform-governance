@@ -20,6 +20,10 @@ import pandas as pd
 import streamlit as st
 
 from database import DatabricksClient, get_tagged_columns
+from idle_watchdog import ensure_started as _ensure_watchdog_started
+from idle_watchdog import seconds_remaining as _watchdog_seconds_remaining
+from idle_watchdog import stop_app_now as _stop_app_now
+from idle_watchdog import touch as _touch_watchdog
 from lineage import LineageClient
 from matching import NameMatcher
 from normalise import SearchNormaliser
@@ -52,11 +56,23 @@ def _get_token() -> str:
     )
 
 
+@st.fragment(run_every=1)
+def _render_watchdog_controls() -> None:
+    """Sidebar countdown to the idle auto-stop, plus a manual stop button."""
+    remaining = _watchdog_seconds_remaining()
+    minutes, seconds = divmod(remaining, 60)
+    st.caption(f"Auto-stop in {minutes:02d}:{seconds:02d} of inactivity")
+    if st.button("Stop app now", use_container_width=True):
+        _stop_app_now()
+        st.success("Stopping the app…")
+
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="SAR Search", page_icon="🔍", layout="wide")
+_ensure_watchdog_started()
 
 st.title("GDPR Subject Access Request Search")
 st.caption(
@@ -136,6 +152,9 @@ with st.sidebar:
     st.divider()
     search_clicked = st.button("Search", type="primary", use_container_width=True)
 
+    st.divider()
+    _render_watchdog_controls()
+
 # ---------------------------------------------------------------------------
 # Main area — guard clauses
 # ---------------------------------------------------------------------------
@@ -163,6 +182,8 @@ token = _get_token()
 if not token:
     st.error("No auth token available. Ensure the app is running inside Databricks.")
     st.stop()
+
+_touch_watchdog()
 
 # ---------------------------------------------------------------------------
 # Initialise service objects (once per search run)

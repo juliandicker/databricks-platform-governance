@@ -4,3 +4,5 @@ env:
     valueFrom: 'sql-warehouse'
   - name: STREAMLIT_GATHER_USAGE_STATS
     value: 'false'
+  - name: IDLE_TIMEOUT_MINUTES
+    value: '30'

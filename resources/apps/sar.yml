@@ -23,3 +23,5 @@ resources:
           group_name: sg-dbplat-data-stewards
         - level: CAN_MANAGE
           group_name: sg-dbplat-data-platform-admins
+        - level: CAN_MANAGE
+          service_principal_name: '${resources.apps.sar_app.service_principal_client_id}'
