@@ -7,7 +7,7 @@ resources:
         in silver for a given identifier. Lineage section shows downstream
         gold/bronze tables via system.access.table_lineage.
         Restricted to data stewards and platform admins.
-      source_code_path: ../../apps/sar_app
+      source_code_path: ${workspace.file_path}/apps/sar_app
 
       resources:
         - name: "sql-warehouse"
