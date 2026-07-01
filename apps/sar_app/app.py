@@ -19,7 +19,10 @@ import os
 import streamlit as st
 import pandas as pd
 from rapidfuzz import fuzz
+from nicknames import NickNamer
 from databricks import sql as dbsql
+
+_namer = NickNamer()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -33,115 +36,19 @@ TAG_MAP = {
     "Postcode / Location": "class.location",
 }
 
-# class.location uses LIKE (partial postcodes); class.name uses nickname expansion + fuzzy
+# class.location uses LIKE containment (partial postcodes).
+# class.name uses the nicknames library for SQL expansion + WRatio for Python scoring.
 LIKE_TAGS = {"class.location"}
 
 _HONORIFICS = {"mr", "mrs", "ms", "miss", "dr", "prof", "sir", "mx", "rev", "lord", "lady"}
 
-# Common English name nicknames / short forms.
-# Each key maps to a list of variants that should be searched alongside it.
-NICKNAMES: dict[str, list[str]] = {
-    "anthony":    ["tony", "ant", "antony", "anton"],
-    "tony":       ["anthony", "ant", "antony"],
-    "ant":        ["anthony", "antony"],
-    "antony":     ["anthony", "tony", "ant"],
-    "robert":     ["bob", "rob", "bobby", "robbie", "bert"],
-    "bob":        ["robert", "rob", "bobby"],
-    "rob":        ["robert", "bob", "robbie"],
-    "william":    ["bill", "will", "billy", "willy", "liam"],
-    "bill":       ["william", "will", "billy"],
-    "will":       ["william", "bill", "billy"],
-    "liam":       ["william"],
-    "james":      ["jim", "jimmy", "jamie", "jay"],
-    "jim":        ["james", "jimmy", "jamie"],
-    "jamie":      ["james", "jim"],
-    "michael":    ["mike", "mick", "mickey", "micky"],
-    "mike":       ["michael", "mick", "mickey"],
-    "mick":       ["michael", "mike"],
-    "thomas":     ["tom", "tommy"],
-    "tom":        ["thomas", "tommy"],
-    "tommy":      ["thomas", "tom"],
-    "christopher": ["chris", "christy", "kit"],
-    "chris":      ["christopher", "christy"],
-    "daniel":     ["dan", "danny"],
-    "dan":        ["daniel", "danny"],
-    "benjamin":   ["ben", "benny", "benji"],
-    "ben":        ["benjamin", "benny"],
-    "alexander":  ["alex", "al", "sandy", "lex"],
-    "alex":       ["alexander", "alexandra", "alexis"],
-    "samuel":     ["sam", "sammy"],
-    "sam":        ["samuel", "samantha", "sammy"],
-    "samantha":   ["sam", "sammy"],
-    "nicholas":   ["nick", "nico", "nicky"],
-    "nick":       ["nicholas", "nico"],
-    "stephen":    ["steve", "steven", "stevie"],
-    "steven":     ["steve", "stephen", "stevie"],
-    "steve":      ["stephen", "steven", "stevie"],
-    "matthew":    ["matt", "matty"],
-    "matt":       ["matthew", "matty"],
-    "joseph":     ["joe", "joey"],
-    "joe":        ["joseph", "joey"],
-    "john":       ["johnny", "jon", "jack"],
-    "jon":        ["john", "johnny"],
-    "johnny":     ["john", "jon"],
-    "jack":       ["john", "jake"],
-    "jacob":      ["jake", "jay"],
-    "jake":       ["jacob", "jack"],
-    "henry":      ["harry", "hal"],
-    "harry":      ["henry", "harold", "hal"],
-    "harold":     ["harry", "hal"],
-    "charles":    ["charlie", "chuck", "chas"],
-    "charlie":    ["charles", "chuck"],
-    "edward":     ["ed", "eddie", "ned", "ted"],
-    "ed":         ["edward", "eddie", "ted"],
-    "ted":        ["edward", "ed"],
-    "andrew":     ["andy", "drew"],
-    "andy":       ["andrew"],
-    "drew":       ["andrew"],
-    "richard":    ["rick", "ricky", "dick", "rich"],
-    "rick":       ["richard", "ricky"],
-    "peter":      ["pete", "petey"],
-    "pete":       ["peter"],
-    "frederick":  ["fred", "freddie", "freddy"],
-    "fred":       ["frederick", "freddie"],
-    "david":      ["dave", "davey"],
-    "dave":       ["david"],
-    "mark":       ["marcus"],
-    "marcus":     ["mark"],
-    "patrick":    ["pat", "paddy"],
-    "pat":        ["patrick", "patricia"],
-    "katherine":  ["kate", "katy", "katie", "kathy", "kat", "cath", "catherine"],
-    "catherine":  ["kate", "cath", "cat", "katherine", "kath"],
-    "kate":       ["katherine", "catherine", "katy", "katie"],
-    "elizabeth":  ["liz", "beth", "betty", "eliza", "lisa", "ellie", "bess"],
-    "liz":        ["elizabeth", "beth", "betty"],
-    "beth":       ["elizabeth", "liz"],
-    "jennifer":   ["jenny", "jen"],
-    "jenny":      ["jennifer", "jen"],
-    "jen":        ["jennifer", "jenny"],
-    "patricia":   ["pat", "trish", "tricia"],
-    "trish":      ["patricia", "pat"],
-    "susan":      ["sue", "susie"],
-    "sue":        ["susan", "susie"],
-    "victoria":   ["vicky", "vic", "vikki"],
-    "vicky":      ["victoria", "vic"],
-    "amelia":     ["amy", "milly", "millie", "mel"],
-    "amy":        ["amelia"],
-    "millie":     ["amelia", "milly", "millicent"],
-    "sarah":      ["sara"],
-    "sara":       ["sarah"],
-    "claire":     ["clara", "clare"],
-    "helen":      ["eleanor", "nell", "elena"],
-    "emily":      ["em", "emma"],
-    "emma":       ["emily", "em"],
-    "margaret":   ["maggie", "meg", "peggy", "marge"],
-    "maggie":     ["margaret", "meg"],
-    "dorothy":    ["dot", "dottie", "dolly"],
-    "ian":        ["iain"],
-    "iain":       ["ian"],
-    "neil":       ["nigel"],
-    "nigel":      ["neil"],
-}
+
+def _name_variants(token: str) -> list[str]:
+    """Return the token plus all nickname variants from the nicknames library."""
+    variants: set[str] = {token.lower()}
+    for form in (token, token.capitalize()):
+        variants.update(v.lower() for v in _namer.get_all_nicknames(form))
+    return list(variants)
 
 
 def clean_search_value(tag: str, val: str) -> str:
@@ -156,14 +63,14 @@ def clean_search_value(tag: str, val: str) -> str:
 
 def _name_sql_clause(col: str, clean_val: str) -> str:
     """
-    Build a WHERE clause for a name column using expanded OR LIKE per token.
-    Each token in the search term is expanded with its known nickname variants,
-    and all tokens must be present (AND of per-token OR-LIKE groups).
+    WHERE clause for a name column: OR LIKE across nickname variants per token,
+    ANDed across tokens. Uses the nicknames library (not a hardcoded dict) so
+    'tony' expands to include 'anthony', 'ant', etc. without manual maintenance.
     Example: 'Tony Hill' → (LIKE '%tony%' OR LIKE '%anthony%' OR ...) AND LIKE '%hill%'
     """
     token_groups = []
     for token in clean_val.lower().split():
-        variants = [token] + NICKNAMES.get(token, [])
+        variants = _name_variants(token)
         likes = " OR ".join(
             f"LOWER(CAST(`{col}` AS STRING)) LIKE '%{v.replace(chr(39), chr(39)*2)}%'"
             for v in variants
@@ -222,7 +129,7 @@ def search_silver_table(
     """
     Search silver.<schema>.<table> with the given conditions.
 
-    - class.name:     expanded OR LIKE pre-filter (nicknames) + rapidfuzz post-filter
+    - class.name:     nicknames-library OR LIKE pre-filter per token + WRatio post-filter
     - class.location: LIKE containment
     - everything else: exact equality
 
@@ -252,10 +159,10 @@ def search_silver_table(
     if df.empty or not name_conditions:
         return df
 
-    # Rapidfuzz post-filter: score each row against the clean search values
+    # Rapidfuzz post-filter: WRatio tries multiple strategies and picks the best score.
     def _row_score(row: pd.Series) -> int:
         scores = [
-            fuzz.token_sort_ratio(val.lower(), str(row.get(col, "")).lower())
+            fuzz.WRatio(val.lower(), str(row.get(col, "")).lower())
             for col, val in name_conditions
         ]
         return min(scores)  # row must pass threshold for ALL name conditions
