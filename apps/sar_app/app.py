@@ -371,6 +371,5 @@ if matched_tables:
         )
         st.caption(
             "These downstream tables **may** contain data derived from the subject's records. "
-            "Check them manually or run the formal SAR job (`platform-sar-search`) "
-            "for an auditable record."
+            "Check them manually to confirm before including in a SAR response."
         )
