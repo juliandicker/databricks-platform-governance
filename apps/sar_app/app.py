@@ -16,6 +16,7 @@ tables were derived from any silver table that contained a match.
 """
 
 import os
+import re
 import streamlit as st
 import pandas as pd
 from rapidfuzz import fuzz
@@ -51,14 +52,23 @@ def _name_variants(token: str) -> list[str]:
     return list(variants)
 
 
+def _normalize_phone(val: str) -> str:
+    """Strip +44/0044 country code (replacing with leading 0) then remove spaces."""
+    val = re.sub(r"^\+44", "0", val.strip())
+    val = re.sub(r"^0044", "0", val)
+    return re.sub(r"\s+", "", val)
+
+
 def clean_search_value(tag: str, val: str) -> str:
-    """Strip honorifics from name searches; leave other values unchanged."""
-    if tag != "class.name":
-        return val
-    parts = val.strip().split()
-    if parts and parts[0].lower().rstrip(".") in _HONORIFICS:
-        parts = parts[1:]
-    return " ".join(parts)
+    """Normalize search values per tag type before building SQL conditions."""
+    if tag == "class.name":
+        parts = val.strip().split()
+        if parts and parts[0].lower().rstrip(".") in _HONORIFICS:
+            parts = parts[1:]
+        return " ".join(parts)
+    if tag == "class.phone_number":
+        return _normalize_phone(val)
+    return val
 
 
 def _name_sql_clause(col: str, clean_val: str) -> str:
@@ -144,6 +154,14 @@ def search_silver_table(
         if tag == "class.name":
             clauses.append(_name_sql_clause(col, val))
             name_conditions.append((col, val))
+        elif tag == "class.phone_number":
+            # Normalize stored value to match: strip +44/0044 → leading 0, remove spaces
+            norm_col = (
+                f"REGEXP_REPLACE("
+                f"REGEXP_REPLACE(CAST(`{col}` AS STRING), '^(\\\\+44|0044)', '0'),"
+                f" '\\\\s+', '')"
+            )
+            clauses.append(f"{norm_col} = '{safe}'")
         elif tag in LIKE_TAGS:
             clauses.append(f"LOWER(CAST(`{col}` AS STRING)) LIKE LOWER('%{safe}%')")
         else:
