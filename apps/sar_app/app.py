@@ -53,10 +53,11 @@ def _name_variants(token: str) -> list[str]:
 
 
 def _normalize_phone(val: str) -> str:
-    """Strip +44/0044 country code (replacing with leading 0) then remove spaces."""
-    val = re.sub(r"^\+44", "0", val.strip())
-    val = re.sub(r"^0044", "0", val)
-    return re.sub(r"\s+", "", val)
+    """Strip all non-digits and return the last 9 digits (the subscriber portion).
+    Country codes are 1-3 digits, so this discards any prefix format (+44, 0044, 001…)
+    without needing to know which country's code is in use."""
+    digits = re.sub(r"\D", "", val)
+    return digits[-9:] if len(digits) >= 9 else digits
 
 
 def clean_search_value(tag: str, val: str) -> str:
@@ -155,12 +156,8 @@ def search_silver_table(
             clauses.append(_name_sql_clause(col, val))
             name_conditions.append((col, val))
         elif tag == "class.phone_number":
-            # Normalize stored value to match: strip +44/0044 → leading 0, remove spaces
-            norm_col = (
-                f"REGEXP_REPLACE("
-                f"REGEXP_REPLACE(CAST(`{col}` AS STRING), '^(\\\\+44|0044)', '0'),"
-                f" '\\\\s+', '')"
-            )
+            # Normalise stored value to last 9 digits (strips any country code/trunk digit)
+            norm_col = f"RIGHT(REGEXP_REPLACE(CAST(`{col}` AS STRING), '[^0-9]', ''), 9)"
             clauses.append(f"{norm_col} = '{safe}'")
         elif tag in LIKE_TAGS:
             clauses.append(f"LOWER(CAST(`{col}` AS STRING)) LIKE LOWER('%{safe}%')")
