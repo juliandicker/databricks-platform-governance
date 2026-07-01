@@ -1,35 +1,34 @@
+"""SAR Search Databricks App — entry point and Streamlit UI.
+
+This module is intentionally thin: it owns only the page layout, sidebar
+widgets, and the top-level search/lineage orchestration loop.  All business
+logic lives in the supporting modules:
+
+    normalise  — SearchNormaliser  (input cleaning per identifier type)
+    matching   — NameMatcher       (column grouping, SQL clauses, fuzzy scoring)
+    database   — DatabricksClient  (connection lifecycle, cached tag scan)
+    search     — SARSearcher       (WHERE-clause orchestration, post-filter)
+    lineage    — LineageClient     (BFS lineage traversal, display table)
 """
-GDPR Subject Access Request (SAR) Search — Databricks App.
 
-Searches all class.*-tagged columns in silver for a given identifier.
-Queries run as the calling user (user-authorization mode), so data steward
-ABAC exemptions apply automatically — unmasked values are returned.
-
-Name search uses two-stage fuzzy matching:
-  1. SQL pre-filter: expanded OR LIKE across nickname variants per name token
-     so "Tony" also fetches rows containing "Anthony", "Ant", etc.
-  2. Python post-filter: rapidfuzz token_sort_ratio scores the candidates
-     and drops anything below the configurable threshold.
-
-Lineage section uses system.access.table_lineage to show which gold/bronze
-tables were derived from any silver table that contained a match.
-"""
+from __future__ import annotations
 
 import os
-import re
-import streamlit as st
+
 import pandas as pd
-from rapidfuzz import fuzz
-from nicknames import NickNamer
-from databricks import sql as dbsql
+import streamlit as st
 
-_namer = NickNamer()
+from database import DatabricksClient, get_tagged_columns
+from lineage import LineageClient
+from matching import NameMatcher
+from normalise import SearchNormaliser
+from search import SARSearcher
 
 # ---------------------------------------------------------------------------
-# Configuration
+# Module-level constants
 # ---------------------------------------------------------------------------
 
-TAG_MAP = {
+TAG_MAP: dict[str, str] = {
     "Email":               "class.email_address",
     "Name":                "class.name",
     "Date of Birth":       "class.date_of_birth",
@@ -37,186 +36,30 @@ TAG_MAP = {
     "Postcode / Location": "class.location",
 }
 
-# class.location uses LIKE containment (partial postcodes).
-# class.name uses the nicknames library for SQL expansion + WRatio for Python scoring.
-LIKE_TAGS = {"class.location"}
-
-_HONORIFICS = {"mr", "mrs", "ms", "miss", "dr", "prof", "sir", "mx", "rev", "lord", "lady"}
-
-
-def _name_variants(token: str) -> list[str]:
-    """Return the token plus all nickname variants from the nicknames library."""
-    variants: set[str] = {token.lower()}
-    for form in (token, token.capitalize()):
-        variants.update(v.lower() for v in _namer.get_all_nicknames(form))
-    return list(variants)
-
-
-def _normalize_phone(val: str) -> str:
-    """Strip all non-digits and return the last 9 digits (the subscriber portion).
-    Country codes are 1-3 digits, so this discards any prefix format (+44, 0044, 001…)
-    without needing to know which country's code is in use."""
-    digits = re.sub(r"\D", "", val)
-    return digits[-9:] if len(digits) >= 9 else digits
-
-
-def clean_search_value(tag: str, val: str) -> str:
-    """Normalize search values per tag type before building SQL conditions."""
-    if tag == "class.name":
-        parts = val.strip().split()
-        if parts and parts[0].lower().rstrip(".") in _HONORIFICS:
-            parts = parts[1:]
-        return " ".join(parts)
-    if tag == "class.phone_number":
-        return _normalize_phone(val)
-    return val
-
-
-def _name_sql_clause(col: str, clean_val: str) -> str:
-    """
-    WHERE clause for a name column: OR LIKE across nickname variants per token,
-    ANDed across tokens. Uses the nicknames library (not a hardcoded dict) so
-    'tony' expands to include 'anthony', 'ant', etc. without manual maintenance.
-    Example: 'Tony Hill' → (LIKE '%tony%' OR LIKE '%anthony%' OR ...) AND LIKE '%hill%'
-    """
-    token_groups = []
-    for token in clean_val.lower().split():
-        variants = _name_variants(token)
-        likes = " OR ".join(
-            f"LOWER(CAST(`{col}` AS STRING)) LIKE '%{v.replace(chr(39), chr(39)*2)}%'"
-            for v in variants
-        )
-        token_groups.append(f"({likes})")
-    return " AND ".join(token_groups)
+SEARCHABLE_LAYERS: list[str] = ["silver", "gold"]
 
 
 # ---------------------------------------------------------------------------
-# Database helpers
+# Utilities
 # ---------------------------------------------------------------------------
 
 def _get_token() -> str:
+    """Return the caller's Databricks PAT from the request header or env."""
     return (
         st.context.headers.get("x-forwarded-access-token")
         or os.getenv("DATABRICKS_TOKEN", "")
     )
 
 
-def _connect(token: str):
-    host = os.getenv("DATABRICKS_HOST", "").removeprefix("https://")
-    warehouse_id = os.getenv("DATABRICKS_WAREHOUSE_ID", "")
-    return dbsql.connect(
-        server_hostname=host,
-        http_path=f"/sql/1.0/warehouses/{warehouse_id}",
-        access_token=token,
-    )
-
-
-def _query(token: str, sql: str) -> pd.DataFrame:
-    with _connect(token) as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            return cur.fetchall_arrow().to_pandas()
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_tagged_columns(_token: str) -> pd.DataFrame:
-    return _query(_token, """
-        SELECT schema_name  AS table_schema,
-               table_name,
-               column_name,
-               tag_name
-        FROM   silver.information_schema.column_tags
-        WHERE  tag_name LIKE 'class.%'
-    """)
-
-
-def search_silver_table(
-    token: str,
-    schema: str,
-    table: str,
-    conditions: list[tuple[str, str, str]],  # (column, clean_value, tag)
-    fuzzy_threshold: int = 75,
-) -> pd.DataFrame:
-    """
-    Search silver.<schema>.<table> with the given conditions.
-
-    - class.name:     nicknames-library OR LIKE pre-filter per token + WRatio post-filter
-    - class.location: LIKE containment
-    - everything else: exact equality
-
-    Returns matched rows with a _match_score column (100 = exact) when any
-    name condition was applied; rows sorted by score descending.
-    """
-    clauses = []
-    name_conditions: list[tuple[str, str]] = []  # (column, clean_value) for scoring
-
-    for col, val, tag in conditions:
-        safe = val.replace("'", "''")
-        if tag == "class.name":
-            clauses.append(_name_sql_clause(col, val))
-            name_conditions.append((col, val))
-        elif tag == "class.phone_number":
-            # Normalise stored value to last 9 digits (strips any country code/trunk digit)
-            norm_col = f"RIGHT(REGEXP_REPLACE(CAST(`{col}` AS STRING), '[^0-9]', ''), 9)"
-            clauses.append(f"{norm_col} = '{safe}'")
-        elif tag in LIKE_TAGS:
-            clauses.append(f"LOWER(CAST(`{col}` AS STRING)) LIKE LOWER('%{safe}%')")
-        else:
-            clauses.append(f"LOWER(CAST(`{col}` AS STRING)) = LOWER('{safe}')")
-
-    sql = (
-        f"SELECT * FROM silver.`{schema}`.`{table}`"
-        f" WHERE {' AND '.join(clauses)}"
-        f" LIMIT 500"
-    )
-    df = _query(token, sql)
-
-    if df.empty or not name_conditions:
-        return df
-
-    # Rapidfuzz post-filter: WRatio tries multiple strategies and picks the best score.
-    def _row_score(row: pd.Series) -> int:
-        scores = [
-            fuzz.WRatio(val.lower(), str(row.get(col, "")).lower())
-            for col, val in name_conditions
-        ]
-        return min(scores)  # row must pass threshold for ALL name conditions
-
-    df["_match_score"] = df.apply(_row_score, axis=1)
-    df = df[df["_match_score"] >= fuzzy_threshold].copy()
-    df = df.sort_values("_match_score", ascending=False).reset_index(drop=True)
-    return df
-
-
-def get_downstream_tables(token: str, source_tables: list[str]) -> pd.DataFrame:
-    if not source_tables:
-        return pd.DataFrame()
-    in_list = ", ".join(f"'{t}'" for t in source_tables)
-    return _query(token, f"""
-        SELECT
-            source_table_full_name               AS silver_table,
-            target_table_full_name               AS downstream_table,
-            target_table_catalog                 AS target_catalog,
-            COALESCE(entity_type, 'unknown')     AS entity_type,
-            MAX(event_time)                      AS last_seen
-        FROM system.access.table_lineage
-        WHERE source_table_full_name IN ({in_list})
-          AND target_table_full_name IS NOT NULL
-          AND event_date >= current_date() - 365
-        GROUP BY ALL
-        ORDER BY last_seen DESC
-    """)
-
-
 # ---------------------------------------------------------------------------
-# UI
+# Page config
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="SAR Search", page_icon="🔍", layout="wide")
 
 st.title("GDPR Subject Access Request Search")
 st.caption(
-    "Searches silver layer tables using governed `class.*` tags. "
+    "Searches tables using governed `class.*` tags. "
     "Queries run as your user identity — data steward ABAC exemptions apply."
 )
 
@@ -230,31 +73,62 @@ with st.sidebar:
     st.divider()
 
     selected: dict[str, str] = {}
+    fuzzy_threshold = 75  # overridden by the slider when Name is enabled
+
     for label, tag in TAG_MAP.items():
         if st.checkbox(label, value=(label == "Email")):
-            val = st.text_input(label, key=f"input_{label}", label_visibility="collapsed",
-                                placeholder=label)
-            if val.strip():
-                selected[tag] = val.strip()
+            if label == "Date of Birth":
+                dob_val = st.date_input(
+                    label,
+                    value=None,
+                    key=f"input_{label}",
+                    label_visibility="collapsed",
+                    format="DD/MM/YYYY",
+                    help=(
+                        "A date picker avoids ambiguous formats (e.g. 01/02/2000 "
+                        "meaning different dates in different locales)."
+                    ),
+                )
+                if dob_val is not None:
+                    selected[tag] = dob_val.isoformat()
+            else:
+                val = st.text_input(
+                    label,
+                    key=f"input_{label}",
+                    label_visibility="collapsed",
+                    placeholder=label,
+                )
+                if val.strip():
+                    selected[tag] = val.strip()
+            if label == "Name":
+                fuzzy_threshold = st.slider(
+                    "Match threshold",
+                    min_value=50,
+                    max_value=100,
+                    value=75,
+                    step=5,
+                    help=(
+                        "Minimum WRatio score (0–100) for a name to be considered a match. "
+                        "Lower values catch more variants; higher values require closer "
+                        "spelling. Nickname expansion runs regardless of this setting."
+                    ),
+                )
 
     st.divider()
 
-    fuzzy_threshold = st.slider(
-        "Name match threshold",
-        min_value=50, max_value=100, value=75, step=5,
-        help=(
-            "Minimum rapidfuzz token_sort_ratio score (0–100) for a name to be "
-            "considered a match. Lower values catch more variants; higher values "
-            "require closer spelling. Nickname expansion (Tony/Anthony/Ant) runs "
-            "regardless of this threshold."
-        ),
+    catalog = st.radio(
+        "Layer to search",
+        options=SEARCHABLE_LAYERS,
+        index=SEARCHABLE_LAYERS.index("silver"),
+        horizontal=True,
+        help="Only tables with class.* tags are included.",
     )
 
     st.divider()
     search_clicked = st.button("Search", type="primary", use_container_width=True)
 
 # ---------------------------------------------------------------------------
-# Main area
+# Main area — guard clauses
 # ---------------------------------------------------------------------------
 
 if not search_clicked:
@@ -263,8 +137,12 @@ if not search_clicked:
         "then click **Search**.\n\n"
         "**Name matching** strips honorifics (Mr/Mrs/Dr…), expands common "
         "nicknames (Tony → Anthony, Ant…), and ranks results by fuzzy similarity. "
-        "Adjust the threshold slider if you want stricter or broader matches.\n\n"
-        "When multiple identifiers are provided, a row must satisfy **all** of them."
+        "Works across split-name tables (first_name + last_name) as well as "
+        "full-name columns.\n\n"
+        "When multiple identifiers are provided, a row must satisfy **all** of the "
+        "identifiers tagged on its own table — a table without one of the selected "
+        "identifiers is still searched on the ones it does have, since PII fields "
+        "are often split across tables."
     )
     st.stop()
 
@@ -278,113 +156,130 @@ if not token:
     st.stop()
 
 # ---------------------------------------------------------------------------
-# 1. Discover tagged columns
+# Initialise service objects (once per search run)
 # ---------------------------------------------------------------------------
 
-with st.spinner("Loading tagged column catalogue…"):
-    try:
-        tagged_df = get_tagged_columns(token)
-    except Exception as exc:
-        st.error(f"Failed to load column tags: {exc}")
+_db_client = DatabricksClient(token)
+
+try:
+    _name_matcher = NameMatcher()
+    _searcher = SARSearcher(_db_client, _name_matcher)
+    _lineage = LineageClient(_db_client)
+
+    # -----------------------------------------------------------------------
+    # 1. Discover tagged columns
+    # -----------------------------------------------------------------------
+
+    with st.spinner(f"Loading tagged column catalogue from {catalog}…"):
+        try:
+            tagged_df = get_tagged_columns(token, catalog)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Failed to load column tags: {exc}")
+            st.stop()
+
+    if tagged_df.empty:
+        st.warning(f"No class.*-tagged columns found in {catalog}. Apply governed tags first.")
         st.stop()
 
-if tagged_df.empty:
-    st.warning("No class.*-tagged columns found in silver. Apply governed tags first.")
-    st.stop()
+    # -----------------------------------------------------------------------
+    # 2. Search each table
+    # -----------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# 2. Search each silver table
-# ---------------------------------------------------------------------------
+    st.subheader(f"{catalog.capitalize()} Layer Results")
 
-st.subheader("Silver Layer Results")
+    table_list = list(tagged_df.groupby(["table_schema", "table_name"]))
+    matched_tables: list[str] = []
+    any_results = False
 
-tables = tagged_df.groupby(["table_schema", "table_name"])
-matched_tables: list[str] = []
-any_results = False
+    progress = st.progress(0, text=f"Searching {catalog} tables…")
 
-progress = st.progress(0, text="Searching silver tables…")
-table_list = list(tables)
-
-for i, ((schema, table), group) in enumerate(table_list):
-    progress.progress((i + 1) / len(table_list), text=f"Searching `silver.{schema}.{table}`…")
-
-    available = {row.tag_name: row.column_name for _, row in group.iterrows()}
-    conditions = [
-        (available[tag], clean_search_value(tag, val), tag)
-        for tag, val in selected.items()
-        if tag in available
-    ]
-
-    if not conditions:
-        continue
-
-    try:
-        result_df = search_silver_table(token, schema, table, conditions, fuzzy_threshold)
-    except Exception as exc:
-        st.warning(f"`silver.{schema}.{table}` — query failed: {exc}")
-        continue
-
-    if not result_df.empty:
-        any_results = True
-        full_name = f"silver.{schema}.{table}"
-        matched_tables.append(full_name)
-
-        tag_labels = ", ".join(
-            next(k for k, v in TAG_MAP.items() if v == tag)
-            for tag in selected
-            if tag in available
+    for i, ((schema, table), group) in enumerate(table_list):
+        progress.progress(
+            (i + 1) / len(table_list),
+            text=f"Searching `{catalog}.{schema}.{table}`…",
         )
-        score_col = "_match_score" in result_df.columns
-        header = (
-            f"**silver.{schema}.{table}** — {len(result_df)} row(s) matched on: {tag_labels}"
-        )
-        with st.expander(header, expanded=True):
-            display_df = result_df.copy()
-            if score_col:
-                display_df = display_df.rename(columns={"_match_score": "Match Score %"})
-            st.dataframe(display_df, use_container_width=True)
 
-progress.empty()
+        available_tags: dict[str, list[str]] = {}
+        for _, row in group.iterrows():
+            available_tags.setdefault(row.tag_name, []).append(row.column_name)
 
-if not any_results:
-    st.success("No records found in silver for the provided identifier(s).")
+        conditions: list[tuple[list[str], str, str]] = []
+        for tag, val in selected.items():
+            if tag not in available_tags:
+                continue
+            cols = available_tags[tag]
+            clean_val = SearchNormaliser.for_tag(tag, val)
+            conditions.append((cols, clean_val, tag))
 
-# ---------------------------------------------------------------------------
-# 3. Lineage
-# ---------------------------------------------------------------------------
+        if not conditions:
+            continue
 
-if matched_tables:
-    st.divider()
-    st.subheader("Downstream Lineage")
-    st.caption(
-        "Tables that have received data from the matched silver tables, "
-        "according to `system.access.table_lineage` (1-year rolling window)."
-    )
-
-    with st.spinner("Querying lineage…"):
         try:
-            lineage_df = get_downstream_tables(token, matched_tables)
-        except Exception as exc:
-            st.warning(f"Lineage query failed: {exc}")
-            lineage_df = pd.DataFrame()
+            result_df = _searcher.search(catalog, schema, table, conditions, fuzzy_threshold)
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"`{catalog}.{schema}.{table}` — query failed: {exc}")
+            continue
 
-    if lineage_df.empty:
-        st.info(
-            "No downstream lineage found. This may mean no pipelines have run "
-            "since lineage tracking was enabled, or data has not propagated downstream."
-        )
-    else:
-        st.dataframe(
-            lineage_df.rename(columns={
-                "silver_table":     "Source (Silver)",
-                "downstream_table": "Downstream Table",
-                "target_catalog":   "Catalog",
-                "entity_type":      "Written By",
-                "last_seen":        "Last Seen",
-            }),
-            use_container_width=True,
-        )
+        if not result_df.empty:
+            any_results = True
+            matched_tables.append(f"{catalog}.{schema}.{table}")
+
+            tag_labels = ", ".join(
+                next(k for k, v in TAG_MAP.items() if v == tag)
+                for tag in selected
+                if tag in available_tags
+            )
+            header = (
+                f"**{catalog}.{schema}.{table}** "
+                f"— {len(result_df)} row(s) matched on: {tag_labels}"
+            )
+            with st.expander(header, expanded=True):
+                display_df = (
+                    result_df.rename(columns={"_match_score": "Match Score %"})
+                    if "_match_score" in result_df
+                    else result_df
+                )
+                st.dataframe(display_df, use_container_width=True)
+
+    progress.empty()
+
+    if not any_results:
+        st.success("No records found for the provided identifier(s).")
+
+    # -----------------------------------------------------------------------
+    # 3. Lineage
+    # -----------------------------------------------------------------------
+
+    if matched_tables:
+        st.divider()
+        st.subheader("Data Lineage")
         st.caption(
-            "These downstream tables **may** contain data derived from the subject's records. "
-            "Check them manually to confirm before including in a SAR response."
+            "Full transitive lineage via `system.access.table_lineage` "
+            "(1-year rolling window)."
         )
+
+        with st.spinner("Traversing lineage graph…"):
+            try:
+                upstream_df = _lineage.upstream(matched_tables)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"Upstream lineage query failed: {exc}")
+                upstream_df = pd.DataFrame()
+
+            try:
+                downstream_df = _lineage.downstream(matched_tables)
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"Downstream lineage query failed: {exc}")
+                downstream_df = pd.DataFrame()
+
+        lineage_table = _lineage.build_display_table(upstream_df, downstream_df)
+
+        if lineage_table.empty:
+            st.info("No lineage found for the matched tables.")
+        else:
+            st.dataframe(lineage_table, use_container_width=True, hide_index=True)
+            st.caption(
+                "These tables **may** contain data derived from or contributing to the "
+                "subject's records. Verify manually before including in a SAR response."
+            )
+finally:
+    _db_client.close()
