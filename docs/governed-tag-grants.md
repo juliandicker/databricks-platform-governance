@@ -18,6 +18,8 @@ Data Classification must already be enabled on silver and gold before the govern
 
 That's it — one grant at account level applies `ASSIGN` across all governed tags.
 
+![Governed Tags → Account Permissions tab, showing sg-dbplat-governed-tags granted Assign](governed_tags_account_permissions.png)
+
 ## Principal
 
 | Principal | Type | Covers |
