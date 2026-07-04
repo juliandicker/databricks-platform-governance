@@ -18,6 +18,7 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
+from databricks.sdk import WorkspaceClient
 
 from database import DatabricksClient, get_tagged_columns
 from idle_watchdog import ensure_started as _ensure_watchdog_started
@@ -54,6 +55,28 @@ def _get_token() -> str:
         st.context.headers.get("x-forwarded-access-token")
         or os.getenv("DATABRICKS_TOKEN", "")
     )
+
+
+def _build_bronze_plan(
+    lineage_df: pd.DataFrame,
+) -> dict[tuple[str, str, str], list[tuple[list[str], str, str]]]:
+    """Group bronze column lineage results into per-table search conditions."""
+    groups: dict[tuple[str, str, str], dict[str, tuple[str, set[str]]]] = {}
+    for _, row in lineage_df.iterrows():
+        parts = str(row.source_table_full_name).split(".", 2)
+        b_key = (parts[0], parts[1], parts[2])
+        tag, clean_val = str(row.tag), str(row.clean_val)
+        tag_map = groups.setdefault(b_key, {})
+        if tag not in tag_map:
+            tag_map[tag] = (clean_val, set())
+        tag_map[tag][1].add(str(row.source_column_name))
+    return {
+        b_key: [
+            (sorted(col_set), clean_val, tag)
+            for tag, (clean_val, col_set) in tag_map.items()
+        ]
+        for b_key, tag_map in groups.items()
+    }
 
 
 @st.fragment(run_every=1)
@@ -218,7 +241,7 @@ try:
     st.subheader(f"{catalog.capitalize()} Layer Results")
 
     table_list = list(tagged_df.groupby(["table_schema", "table_name"]))
-    matched_tables: list[str] = []
+    matched_tables: list[dict] = []
     any_results = False
 
     progress = st.progress(0, text=f"Searching {catalog} tables…")
@@ -252,7 +275,13 @@ try:
 
         if not result_df.empty:
             any_results = True
-            matched_tables.append(f"{catalog}.{schema}.{table}")
+            matched_tables.append({
+                "full_name":  f"{catalog}.{schema}.{table}",
+                "catalog":    catalog,
+                "schema":     schema,
+                "table":      table,
+                "conditions": conditions,
+            })
 
             tag_labels = ", ".join(
                 next(k for k, v in TAG_MAP.items() if v == tag)
@@ -281,6 +310,8 @@ try:
     # -----------------------------------------------------------------------
 
     if matched_tables:
+        matched_full_names = [e["full_name"] for e in matched_tables]
+
         st.divider()
         st.subheader("Data Lineage")
         st.caption(
@@ -290,13 +321,13 @@ try:
 
         with st.spinner("Traversing lineage graph…"):
             try:
-                upstream_df = _lineage.upstream(matched_tables)
+                upstream_df = _lineage.upstream(matched_full_names)
             except Exception as exc:  # noqa: BLE001
                 st.warning(f"Upstream lineage query failed: {exc}")
                 upstream_df = pd.DataFrame()
 
             try:
-                downstream_df = _lineage.downstream(matched_tables)
+                downstream_df = _lineage.downstream(matched_full_names)
             except Exception as exc:  # noqa: BLE001
                 st.warning(f"Downstream lineage query failed: {exc}")
                 downstream_df = pd.DataFrame()
@@ -311,5 +342,99 @@ try:
                 "These tables **may** contain data derived from or contributing to the "
                 "subject's records. Verify manually before including in a SAR response."
             )
+
+        # -------------------------------------------------------------------
+        # 4. Upstream bronze search via column lineage
+        # -------------------------------------------------------------------
+
+        st.divider()
+        st.subheader("Upstream Source (Bronze) — via column lineage")
+        st.caption(
+            "Searches upstream bronze tables identified via "
+            "`system.access.column_lineage`. Queries run as the app service "
+            "principal, which holds SELECT on bronze."
+        )
+
+        _sp_client: DatabricksClient | None = None
+        try:
+            try:
+                _sp_token = (
+                    WorkspaceClient()
+                    .config.authenticate()["Authorization"]
+                    .removeprefix("Bearer ")
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.warning(
+                    f"Could not acquire service-principal token for bronze access: {exc}"
+                )
+                _sp_token = None
+
+            if _sp_token:
+                _sp_client = DatabricksClient(_sp_token)
+                _sp_searcher = SARSearcher(_sp_client, _name_matcher)
+
+                initial_conditions: dict[str, list[tuple[str, str, str]]] = {}
+                for entry in matched_tables:
+                    for cols, clean_val, tag in entry["conditions"]:
+                        for col in cols:
+                            initial_conditions.setdefault(entry["full_name"], []).append(
+                                (col, tag, clean_val)
+                            )
+
+                with st.spinner("Tracing column lineage to bronze…"):
+                    try:
+                        col_lineage_df = _lineage.column_lineage_to_bronze(
+                            initial_conditions
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"Column lineage query failed: {exc}")
+                        col_lineage_df = pd.DataFrame()
+
+                if col_lineage_df.empty:
+                    st.info("No upstream bronze columns found via column lineage.")
+                else:
+                    bronze_plan = _build_bronze_plan(col_lineage_df)
+                    bronze_any_results = False
+                    b_progress = st.progress(0, text="Searching bronze tables…")
+                    bronze_items = list(bronze_plan.items())
+
+                    for b_i, ((b_cat, b_sch, b_tbl), b_conditions) in enumerate(
+                        bronze_items
+                    ):
+                        b_progress.progress(
+                            (b_i + 1) / len(bronze_items),
+                            text=f"Searching `{b_cat}.{b_sch}.{b_tbl}`…",
+                        )
+                        try:
+                            b_df = _sp_searcher.search(
+                                b_cat, b_sch, b_tbl, b_conditions, fuzzy_threshold
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            st.warning(
+                                f"`{b_cat}.{b_sch}.{b_tbl}` — bronze query failed: {exc}"
+                            )
+                            continue
+
+                        if not b_df.empty:
+                            bronze_any_results = True
+                            b_display_df = (
+                                b_df.rename(columns={"_match_score": "Match Score %"})
+                                if "_match_score" in b_df
+                                else b_df
+                            )
+                            with st.expander(
+                                f"**{b_cat}.{b_sch}.{b_tbl}** "
+                                f"— {len(b_df)} row(s) (upstream source)",
+                                expanded=True,
+                            ):
+                                st.dataframe(b_display_df, use_container_width=True)
+
+                    b_progress.empty()
+                    if not bronze_any_results:
+                        st.info("No upstream bronze records found for this subject.")
+        finally:
+            if _sp_client is not None:
+                _sp_client.close()
+
 finally:
     _db_client.close()

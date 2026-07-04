@@ -82,6 +82,99 @@ class LineageClient:
         """
         return self._traverse(source_tables, direction="downstream", max_depth=max_depth)
 
+    def column_lineage_to_bronze(
+        self,
+        initial_conditions: dict[str, list[tuple[str, str, str]]],
+        max_depth: int = 10,
+    ) -> pd.DataFrame:
+        """Trace column lineage upstream until reaching bronze tables.
+
+        Performs a BFS over ``system.access.column_lineage``, accumulating
+        columns that land in the bronze catalog. Carries the original tag and
+        clean search value through intermediate hops (e.g. gold → silver →
+        bronze), so callers can build search conditions without knowing the
+        intermediate path.
+
+        Args:
+            initial_conditions: Maps each matched silver/gold table full name
+                to a list of ``(column_name, tag, clean_val)`` tuples.
+            max_depth: Safety cap on BFS iterations.
+
+        Returns:
+            DataFrame with columns ``source_table_full_name``,
+            ``source_column_name``, ``tag``, ``clean_val``. Empty if no
+            bronze lineage found.
+        """
+        if not initial_conditions:
+            return pd.DataFrame()
+
+        # frontier: (table_full_name, column_name) -> (tag, clean_val)
+        frontier: dict[tuple[str, str], tuple[str, str]] = {
+            (table, col): (tag, clean_val)
+            for table, cols_info in initial_conditions.items()
+            for col, tag, clean_val in cols_info
+        }
+        visited: set[tuple[str, str]] = set(frontier)
+        bronze_rows: list[dict[str, str]] = []
+
+        for _ in range(max_depth):
+            if not frontier:
+                break
+
+            table_to_cols: dict[str, set[str]] = {}
+            for table, col in frontier:
+                table_to_cols.setdefault(table, set()).add(col)
+
+            table_in = ", ".join(f"'{t}'" for t in table_to_cols)
+            col_in = ", ".join(
+                f"'{c}'" for c in {c for cols in table_to_cols.values() for c in cols}
+            )
+
+            df = self._client.query(f"""
+                SELECT source_table_full_name,
+                       source_column_name,
+                       target_table_full_name,
+                       target_column_name
+                FROM   system.access.column_lineage
+                WHERE  target_table_full_name IN ({table_in})
+                  AND  target_column_name     IN ({col_in})
+                  AND  event_date             >= current_date() - {self._LOOKBACK_DAYS}
+                GROUP BY ALL
+            """)
+
+            if df.empty:
+                break
+
+            next_frontier: dict[tuple[str, str], tuple[str, str]] = {}
+
+            for _, row in df.iterrows():
+                tgt_key = (row.target_table_full_name, row.target_column_name)
+                if tgt_key not in frontier:
+                    continue  # cross-table false match from independent IN predicates
+
+                tag, clean_val = frontier[tgt_key]
+                src_key = (row.source_table_full_name, row.source_column_name)
+
+                if src_key in visited:
+                    continue
+                visited.add(src_key)
+
+                if str(row.source_table_full_name).startswith("bronze."):
+                    bronze_rows.append({
+                        "source_table_full_name": row.source_table_full_name,
+                        "source_column_name":     row.source_column_name,
+                        "tag":                    tag,
+                        "clean_val":              clean_val,
+                    })
+                else:
+                    next_frontier[src_key] = (tag, clean_val)
+
+            frontier = next_frontier
+
+        if not bronze_rows:
+            return pd.DataFrame()
+        return pd.DataFrame(bronze_rows)
+
     def build_display_table(
         self,
         upstream_df: pd.DataFrame,
