@@ -11,11 +11,17 @@
 applied, skipped_error = [], []
 
 tables = spark.sql("""
-    SELECT CONCAT(table_catalog, '.', table_schema, '.', table_name) AS full_name
-    FROM   system.information_schema.columns
-    WHERE  table_catalog IN ('bronze', 'silver', 'gold')
-      AND  column_name   = '_delete_at'
-      AND  table_schema != 'information_schema'
+    SELECT CONCAT(c.table_catalog, '.', c.table_schema, '.', c.table_name) AS full_name
+    FROM   system.information_schema.columns c
+    JOIN   system.information_schema.tables t
+           ON  t.table_catalog = c.table_catalog
+           AND t.table_schema  = c.table_schema
+           AND t.table_name    = c.table_name
+    WHERE  c.table_catalog IN ('bronze', 'silver', 'gold')
+      AND  c.column_name   = '_delete_at'
+      AND  c.table_schema != 'information_schema'
+      AND  t.table_type NOT IN ('VIEW', 'STREAMING_TABLE', 'MATERIALIZED_VIEW')
+      AND  c.table_name NOT LIKE '\\_%'
 """).collect()
 
 for row in tables:
