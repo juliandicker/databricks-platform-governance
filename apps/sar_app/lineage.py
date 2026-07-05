@@ -92,18 +92,22 @@ class LineageClient:
         """
         return self._traverse(source_tables, direction="downstream", max_depth=max_depth)
 
-    def column_lineage_to_bronze(
+    def column_lineage_upstream(
         self,
         initial_conditions: dict[str, list[tuple[str, str, str]]],
         max_depth: int = 10,
     ) -> pd.DataFrame:
-        """Trace column lineage upstream until reaching bronze tables.
+        """Trace column lineage upstream, collecting every hop up to bronze.
 
-        Performs a BFS over ``system.access.column_lineage``, accumulating
-        columns that land in the bronze catalog. Carries the original tag and
-        clean search value through intermediate hops (e.g. gold → silver →
-        bronze), so callers can build search conditions without knowing the
-        intermediate path.
+        Performs a BFS over ``system.access.column_lineage``. Every
+        intermediate hop is collected, not just the terminal bronze source —
+        e.g. if gold was searched directly, the silver table gold was built
+        from is a real copy of the subject's data and must be searched too,
+        not skipped as a mere pass-through on the way to bronze. Carries the
+        original tag and clean search value through each hop so callers can
+        build search conditions without knowing the intermediate path.
+        Traversal stops once a hop lands in bronze — nothing upstream of
+        bronze is tracked in this platform.
 
         Args:
             initial_conditions: Maps each matched silver/gold table full name
@@ -113,7 +117,7 @@ class LineageClient:
         Returns:
             DataFrame with columns ``source_table_full_name``,
             ``source_column_name``, ``tag``, ``clean_val``. Empty if no
-            bronze lineage found.
+            upstream lineage found.
         """
         if not initial_conditions:
             return pd.DataFrame()
@@ -125,7 +129,7 @@ class LineageClient:
             for col, tag, clean_val in cols_info
         }
         visited: set[tuple[str, str]] = set(frontier)
-        bronze_rows: list[dict[str, str]] = []
+        upstream_rows: list[dict[str, str]] = []
 
         for _ in range(max_depth):
             if not frontier:
@@ -173,21 +177,21 @@ class LineageClient:
                     continue
                 visited.add(src_key)
 
-                if str(row.source_table_full_name).startswith("bronze."):
-                    bronze_rows.append({
-                        "source_table_full_name": row.source_table_full_name,
-                        "source_column_name":     row.source_column_name,
-                        "tag":                    tag,
-                        "clean_val":              clean_val,
-                    })
-                else:
+                upstream_rows.append({
+                    "source_table_full_name": row.source_table_full_name,
+                    "source_column_name":     row.source_column_name,
+                    "tag":                    tag,
+                    "clean_val":              clean_val,
+                })
+
+                if not str(row.source_table_full_name).startswith("bronze."):
                     next_frontier[src_key] = (tag, clean_val)
 
             frontier = next_frontier
 
-        if not bronze_rows:
+        if not upstream_rows:
             return pd.DataFrame()
-        return pd.DataFrame(bronze_rows)
+        return pd.DataFrame(upstream_rows)
 
     def column_lineage_downstream(
         self,
@@ -197,13 +201,13 @@ class LineageClient:
         """Trace column lineage downstream from matched tables.
 
         Performs a BFS over ``system.access.column_lineage`` in the forward
-        direction. Unlike ``column_lineage_to_bronze`` (which only collects
-        terminal bronze columns), every hop is collected here: a SAR-relevant
-        copy of a subject's data may exist in any derived table, not only at
-        a fixed terminal layer, and downstream copies often don't inherit the
-        originating ``class.*`` tag. Carries the original tag and clean
-        search value through intermediate hops so callers can build search
-        conditions without knowing the derived table's schema.
+        direction, collecting every hop (same principle as
+        ``column_lineage_upstream``): a SAR-relevant copy of a subject's data
+        may exist in any derived table, not only at a fixed terminal layer,
+        and downstream copies often don't inherit the originating
+        ``class.*`` tag. Carries the original tag and clean search value
+        through intermediate hops so callers can build search conditions
+        without knowing the derived table's schema.
 
         Args:
             initial_conditions: Maps each matched silver/gold table full name

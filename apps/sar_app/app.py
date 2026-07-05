@@ -79,9 +79,12 @@ PROVENANCE_SECTIONS = [
     ("direct", "Direct Tag Matches", "Found via governed `class.*` tags."),
     (
         "upstream",
-        "Upstream Source (Bronze) — via column lineage",
-        "Traced via `system.access.column_lineage`. Queries run as the app "
-        "service principal, which holds SELECT on bronze.",
+        "Upstream Sources — via column lineage",
+        "Traced backward via `system.access.column_lineage`, including any "
+        "intermediate table the searched data was built from — not just the "
+        "ultimate bronze source. Bronze reads run as the app service "
+        "principal, which holds SELECT there; other layers run as your "
+        "user identity.",
     ),
     (
         "downstream",
@@ -305,51 +308,65 @@ def _run_search_pipeline(
                 for col in cols:
                     initial_conditions.setdefault(entry["full_name"], []).append((col, tag, clean_val))
 
-        # 4. Upstream bronze search via column lineage (as the app's own SP)
+        # 4. Upstream search via column lineage — every hop back to bronze,
+        # not just the terminal bronze table (an intermediate silver/gold
+        # table the searched data was built from is a real copy too).
+        # Bronze rows need the app's own SP (SELECT-restricted for users);
+        # any other layer can be searched as the calling user, same as a
+        # direct match.
         sp_client: DatabricksClient | None = None
+        sp_searcher: SARSearcher | None = None
         try:
             try:
                 sp_token = get_service_principal_token()
             except Exception as exc:  # noqa: BLE001
                 st.warning(f"Could not acquire service-principal token for bronze access: {exc}")
                 sp_token = None
-
             if sp_token:
                 sp_client = DatabricksClient(sp_token)
                 sp_searcher = SARSearcher(sp_client, name_matcher)
 
-                with st.spinner("Tracing column lineage to bronze…"):
-                    try:
-                        col_lineage_df = lineage.column_lineage_to_bronze(initial_conditions)
-                    except Exception as exc:  # noqa: BLE001
-                        st.warning(f"Column lineage query failed: {exc}")
-                        col_lineage_df = pd.DataFrame()
+            with st.spinner("Tracing column lineage upstream…"):
+                try:
+                    col_lineage_df = lineage.column_lineage_upstream(initial_conditions)
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(f"Column lineage query failed: {exc}")
+                    col_lineage_df = pd.DataFrame()
 
-                if not col_lineage_df.empty:
-                    bronze_plan = _build_lineage_plan(col_lineage_df, "source_table_full_name", "source_column_name")
-                    b_progress = st.progress(0, text="Searching bronze tables…")
-                    bronze_items = list(bronze_plan.items())
-                    for b_i, ((b_cat, b_sch, b_tbl), b_conditions) in enumerate(bronze_items):
-                        b_progress.progress((b_i + 1) / len(bronze_items), text=f"Searching `{b_cat}.{b_sch}.{b_tbl}`…")
-                        try:
-                            b_df = sp_searcher.search(b_cat, b_sch, b_tbl, b_conditions, fuzzy_threshold)
-                        except Exception as exc:  # noqa: BLE001
-                            st.warning(f"`{b_cat}.{b_sch}.{b_tbl}` — bronze query failed: {exc}")
+            if not col_lineage_df.empty:
+                upstream_plan = _build_lineage_plan(col_lineage_df, "source_table_full_name", "source_column_name")
+                u_progress = st.progress(0, text="Searching upstream tables…")
+                upstream_items = list(upstream_plan.items())
+                for u_i, ((u_cat, u_sch, u_tbl), u_conditions) in enumerate(upstream_items):
+                    u_progress.progress((u_i + 1) / len(upstream_items), text=f"Searching `{u_cat}.{u_sch}.{u_tbl}`…")
+
+                    if u_cat == "bronze":
+                        if sp_searcher is None:
+                            st.warning(f"`{u_cat}.{u_sch}.{u_tbl}` — skipped, no service-principal token for bronze access.")
                             continue
-                        if not b_df.empty:
-                            full_name = f"{b_cat}.{b_sch}.{b_tbl}"
-                            tag_labels = ", ".join(tag for _, _, tag in b_conditions)
-                            cards.append(_prep_card(full_name, b_cat, b_sch, b_tbl, "upstream", tag_labels, b_df))
-                            lineage_nodes[full_name] = LineageNode(
-                                full_name, b_cat, "upstream", row_count=len(b_df),
-                                caption=_node_caption(sp_client, full_name, len(b_df)),
+                        active_searcher, active_client = sp_searcher, sp_client
+                    else:
+                        active_searcher, active_client = searcher, db_client
+
+                    try:
+                        u_df = active_searcher.search(u_cat, u_sch, u_tbl, u_conditions, fuzzy_threshold)
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"`{u_cat}.{u_sch}.{u_tbl}` — upstream query failed: {exc}")
+                        continue
+                    if not u_df.empty:
+                        full_name = f"{u_cat}.{u_sch}.{u_tbl}"
+                        tag_labels = ", ".join(tag for _, _, tag in u_conditions)
+                        cards.append(_prep_card(full_name, u_cat, u_sch, u_tbl, "upstream", tag_labels, u_df))
+                        lineage_nodes[full_name] = LineageNode(
+                            full_name, u_cat, "upstream", row_count=len(u_df),
+                            caption=_node_caption(active_client, full_name, len(u_df)),
+                        )
+                        cols_used = ", ".join(sorted({c for cols, _, _ in u_conditions for c in cols}))
+                        for matched in matched_full_names:
+                            lineage_edges[(full_name, matched)] = LineageEdge(
+                                full_name, matched, color=_STATUS_STYLE["upstream"]["color"], label=cols_used
                             )
-                            cols_used = ", ".join(sorted({c for cols, _, _ in b_conditions for c in cols}))
-                            for matched in matched_full_names:
-                                lineage_edges[(full_name, matched)] = LineageEdge(
-                                    full_name, matched, color=_STATUS_STYLE["upstream"]["color"], label=cols_used
-                                )
-                    b_progress.empty()
+                u_progress.empty()
         finally:
             if sp_client is not None:
                 sp_client.close()
