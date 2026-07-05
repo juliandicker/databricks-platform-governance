@@ -1,7 +1,10 @@
 -- ABAC column mask policies — applied to silver and gold catalogs.
 -- Each policy fires when a column carries the matching governed tag(s).
--- Exceptions: pii_readers and data_stewards see unmasked data; team SPs are exempt
--- via {{job.parameters.exempt_sps}} (substituted at runtime by the governance job).
+-- Exceptions: pii_readers and data_stewards see unmasked data; team SPs and the
+-- SAR app SP are exempt via {{job.parameters.exempt_sps}} (substituted at runtime
+-- by the governance job) — the SAR app SP needs real values to execute an erasure
+-- it already found via the calling user's own unmasked search; a masked WHERE
+-- clause predicate against a masked column would never match the real row.
 --
 -- Multiple policies must not match the same column for the same user — Databricks
 -- returns an error rather than picking one. Tags are partitioned across policies

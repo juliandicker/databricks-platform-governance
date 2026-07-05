@@ -23,8 +23,9 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+import numpy as np
 import pandas as pd
 
 from database import DatabricksClient
@@ -70,12 +71,31 @@ def _sql_timestamp(dt: datetime) -> str:
 
 
 def _row_predicate(row: pd.Series, columns: list[str]) -> str:
-    """Build a single ``(col = 'val' AND ...)`` clause identifying *row*."""
+    """Build a single ``(col = val AND ...)`` clause identifying *row*.
+
+    Compares each column against a type-appropriate literal rather than
+    ``CAST(col AS STRING) = 'val'`` for everything — Databricks' own
+    TIMESTAMP/DATE-to-string serialization doesn't necessarily match
+    pandas' ``str()`` rendering of the same value character-for-character
+    (e.g. timezone suffix, fractional seconds), which silently made the
+    dry-run count come back 0 for any table with a timestamp/date column
+    and no declared primary key.
+    """
     clauses = []
     for col in columns:
         val = row[col]
         if pd.isna(val):
             clauses.append(f"`{col}` IS NULL")
+        elif isinstance(val, (pd.Timestamp, datetime)):
+            clauses.append(f"`{col}` = {_sql_timestamp(val)}")
+        elif isinstance(val, date):
+            clauses.append(f"`{col}` = DATE '{val.strftime('%Y-%m-%d')}'")
+        elif isinstance(val, (bool, np.bool_)):
+            clauses.append(f"`{col}` = {'TRUE' if val else 'FALSE'}")
+        elif isinstance(val, (int, float, np.integer, np.floating)):
+            # str(), not repr() — numpy >=2.0 changed scalar repr() to
+            # "np.int64(5)" instead of a bare "5", which would break the SQL.
+            clauses.append(f"`{col}` = {val!s}")
         else:
             clauses.append(f"CAST(`{col}` AS STRING) = {_sql_string(val)}")
     return "(" + " AND ".join(clauses) + ")"
