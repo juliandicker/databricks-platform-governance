@@ -156,6 +156,7 @@ def _prep_card(
     provenance: str,
     matched_column_or_tag: str,
     result_df: pd.DataFrame,
+    vacuum_retention: str,
 ) -> dict:
     """Build a review card: the real table columns (for erasure targeting)
     plus a display copy with a leading ``Erase`` checkbox column."""
@@ -175,15 +176,10 @@ def _prep_card(
         "table": table,
         "provenance": provenance,
         "matched_column_or_tag": matched_column_or_tag,
+        "vacuum_retention": vacuum_retention,
         "original_df": original,
         "df": display,
     }
-
-
-def _node_caption(client: DatabricksClient, full_name: str, row_count: int) -> str:
-    """Row count plus the table's actual VACUUM retention, for the lineage map."""
-    vacuum_raw, _ = get_vacuum_retention(client, full_name)
-    return f"{row_count} row(s) · VACUUM: {vacuum_raw}"
 
 
 def _render_case_bar(
@@ -300,10 +296,13 @@ def _run_search_pipeline(
                     next(k for k, v in TAG_MAP.items() if v == tag)
                     for tag in selected if tag in available_tags
                 )
-                cards.append(_prep_card(full_name, catalog, schema, table, "direct", tag_labels, result_df))
+                vacuum_raw, _ = get_vacuum_retention(db_client, full_name)
+                cards.append(_prep_card(
+                    full_name, catalog, schema, table, "direct", tag_labels, result_df, vacuum_raw
+                ))
                 lineage_nodes[full_name] = LineageNode(
                     full_name, catalog, "direct", row_count=len(result_df),
-                    caption=_node_caption(db_client, full_name, len(result_df)),
+                    caption=f"{len(result_df)} row(s)",
                 )
 
         progress.empty()
@@ -399,10 +398,13 @@ def _run_search_pipeline(
                     if not u_df.empty:
                         full_name = f"{u_cat}.{u_sch}.{u_tbl}"
                         tag_labels = ", ".join(tag for _, _, tag in u_conditions)
-                        cards.append(_prep_card(full_name, u_cat, u_sch, u_tbl, "upstream", tag_labels, u_df))
+                        vacuum_raw, _ = get_vacuum_retention(active_client, full_name)
+                        cards.append(_prep_card(
+                            full_name, u_cat, u_sch, u_tbl, "upstream", tag_labels, u_df, vacuum_raw
+                        ))
                         lineage_nodes[full_name] = LineageNode(
                             full_name, u_cat, "upstream", row_count=len(u_df),
-                            caption=_node_caption(active_client, full_name, len(u_df)),
+                            caption=f"{len(u_df)} row(s)",
                         )
                         cols_used = ", ".join(sorted({c for cols, _, _ in u_conditions for c in cols}))
                         for matched in matched_full_names:
@@ -436,10 +438,13 @@ def _run_search_pipeline(
                 if not d_df.empty:
                     full_name = f"{d_cat}.{d_sch}.{d_tbl}"
                     tag_labels = ", ".join(tag for _, _, tag in d_conditions)
-                    cards.append(_prep_card(full_name, d_cat, d_sch, d_tbl, "downstream", tag_labels, d_df))
+                    vacuum_raw, _ = get_vacuum_retention(db_client, full_name)
+                    cards.append(_prep_card(
+                        full_name, d_cat, d_sch, d_tbl, "downstream", tag_labels, d_df, vacuum_raw
+                    ))
                     lineage_nodes[full_name] = LineageNode(
                         full_name, d_cat, "downstream", row_count=len(d_df),
-                        caption=_node_caption(db_client, full_name, len(d_df)),
+                        caption=f"{len(d_df)} row(s)",
                     )
                     cols_used = ", ".join(sorted({c for cols, _, _ in d_conditions for c in cols}))
                     for matched in matched_full_names:
@@ -765,6 +770,11 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
                 f'border:1px solid rgba(127,140,160,0.22);border-radius:5px;padding:3px 9px;'
                 f'font-family:ui-monospace,monospace;">matched on: {card["matched_column_or_tag"]}</span>'
             )
+            vacuum_chip_html = (
+                f'<span style="font-size:0.75rem;color:#8b93a7;background:rgba(127,140,160,0.12);'
+                f'border:1px solid rgba(127,140,160,0.22);border-radius:5px;padding:3px 9px;'
+                f'font-family:ui-monospace,monospace;">VACUUM: {card["vacuum_retention"]}</span>'
+            )
             header.markdown(
                 f'''<div style="display:flex;align-items:center;justify-content:space-between;
                             flex-wrap:wrap;gap:10px;margin-bottom:10px;">
@@ -774,6 +784,7 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
                     </span>
                     {badge_html}
                     {chip_html}
+                    {vacuum_chip_html}
                   </div>
                   <span style="font-size:0.8125rem;color:#8b93a7;white-space:nowrap;">
                     {n_selected} of {len(edited)} selected
