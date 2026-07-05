@@ -58,7 +58,7 @@ TAG_MAP: dict[str, str] = {
 
 SEARCHABLE_LAYERS: list[str] = ["silver", "gold"]
 
-#: Fuzzy name matches still show down to the sidebar's own threshold, but
+#: Fuzzy name matches still show down to the match threshold slider, but
 #: only ones at/above this score are pre-checked for erasure — anything
 #: between the two is a borderline match that needs a human look before
 #: being included.
@@ -575,67 +575,67 @@ st.caption(
     "looks like a false positive before confirming."
 )
 
-# ---------------------------------------------------------------------------
-# Sidebar
-# ---------------------------------------------------------------------------
-
 with st.sidebar:
-    st.header("Search Identifiers")
-    st.markdown("Select one or more identifier types and enter the values to find.")
-    st.divider()
+    _render_watchdog_controls()
 
-    selected: dict[str, str] = {}
-    fuzzy_threshold = 75  # overridden by the slider when Name is enabled
+# ---------------------------------------------------------------------------
+# Search options — laid out across the main page's width rather than the
+# sidebar, so all identifier types are visible at once instead of requiring
+# scrolling through a long single-column list.
+# ---------------------------------------------------------------------------
 
-    for label, tag in TAG_MAP.items():
-        if st.checkbox(label, value=(label == "Name")):
-            if label == "Date of Birth":
-                today = date.today()
-                try:
-                    min_dob = today.replace(year=today.year - 100)
-                except ValueError:
-                    # today is 29 Feb and year-100 isn't a leap year
-                    min_dob = today.replace(year=today.year - 100, day=28)
-                dob_val = st.date_input(
-                    label,
-                    value=None,
-                    min_value=min_dob,
-                    max_value=today,
-                    key=f"input_{label}",
-                    label_visibility="collapsed",
-                    format="DD/MM/YYYY",
-                    help=(
-                        "A date picker avoids ambiguous formats (e.g. 01/02/2000 "
-                        "meaning different dates in different locales)."
-                    ),
-                )
-                if dob_val is not None:
-                    selected[tag] = dob_val.isoformat()
-            else:
-                val = st.text_input(
-                    label,
-                    key=f"input_{label}",
-                    label_visibility="collapsed",
-                    placeholder=label,
-                )
-                if val.strip():
-                    selected[tag] = val.strip()
-            if label == "Name":
-                fuzzy_threshold = st.slider(
-                    "Match threshold",
-                    min_value=50,
-                    max_value=100,
-                    value=75,
-                    step=5,
-                    help=(
-                        "Minimum WRatio score (0–100) for a name to be considered a match. "
-                        "Lower values catch more variants; higher values require closer "
-                        "spelling. Nickname expansion runs regardless of this setting."
-                    ),
-                )
+st.subheader("Search Identifiers")
+st.caption("Enter one or more identifier values to search — leave any you don't need blank.")
 
-    st.divider()
+selected: dict[str, str] = {}
+fuzzy_threshold = 75  # overridden by the slider below
 
+identifier_cols = st.columns(len(TAG_MAP))
+for col, (label, tag) in zip(identifier_cols, TAG_MAP.items()):
+    with col:
+        if label == "Date of Birth":
+            today = date.today()
+            try:
+                min_dob = today.replace(year=today.year - 100)
+            except ValueError:
+                # today is 29 Feb and year-100 isn't a leap year
+                min_dob = today.replace(year=today.year - 100, day=28)
+            dob_val = st.date_input(
+                label,
+                value=None,
+                min_value=min_dob,
+                max_value=today,
+                key=f"input_{label}",
+                format="DD/MM/YYYY",
+                help=(
+                    "A date picker avoids ambiguous formats (e.g. 01/02/2000 "
+                    "meaning different dates in different locales)."
+                ),
+            )
+            if dob_val is not None:
+                selected[tag] = dob_val.isoformat()
+        else:
+            val = st.text_input(label, key=f"input_{label}", placeholder=label)
+            if val.strip():
+                selected[tag] = val.strip()
+        if label == "Name":
+            fuzzy_threshold = st.slider(
+                "Match threshold",
+                min_value=50,
+                max_value=100,
+                value=75,
+                step=5,
+                help=(
+                    "Minimum WRatio score (0–100) for a name to be considered a match. "
+                    "Lower values catch more variants; higher values require closer "
+                    "spelling. Nickname expansion runs regardless of this setting."
+                ),
+            )
+
+st.divider()
+
+layer_col, search_col = st.columns([3, 1])
+with layer_col:
     catalog = st.radio(
         "Layer to search",
         options=SEARCHABLE_LAYERS,
@@ -643,12 +643,11 @@ with st.sidebar:
         horizontal=True,
         help="Only tables with class.* tags are included.",
     )
-
-    st.divider()
+with search_col:
+    st.write("")  # vertical spacer so the button aligns with the radio, not its label
     search_clicked = st.button("Search", type="primary", use_container_width=True)
 
-    st.divider()
-    _render_watchdog_controls()
+st.divider()
 
 # ---------------------------------------------------------------------------
 # Main area — run the search pipeline only on Search click; everything else (checkbox
@@ -691,8 +690,7 @@ if search_clicked:
 
 if "sar_cards" not in st.session_state:
     st.info(
-        "Select one or more identifier types in the sidebar, enter values, "
-        "then click **Search**.\n\n"
+        "Enter one or more identifier values above, then click **Search**.\n\n"
         "**Name matching** strips honorifics (Mr/Mrs/Dr…), expands common "
         "nicknames (Tony → Anthony, Ant…), and ranks results by fuzzy similarity. "
         "Works across split-name tables (first_name + last_name) as well as "
