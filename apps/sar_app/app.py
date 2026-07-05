@@ -27,6 +27,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
+import erasure_review
 from database import DatabricksClient, get_service_principal_token, get_tagged_columns
 from erasure import ErasureExecutor, TableErasureTarget, format_delete_sql_pretty, get_vacuum_retention
 from idle_watchdog import ensure_started as _ensure_watchdog_started
@@ -540,6 +541,23 @@ st.markdown(
     </style>""",
     unsafe_allow_html=True,
 )
+
+# A sidebar radio rather than st.navigation/st.Page — this keeps the second
+# page a minimal, isolated addition (call the new module, st.stop()) instead
+# of restructuring the existing single-script search flow below into
+# multiple page-callables.
+page = st.sidebar.radio("Page", ["Search & Erase", "Review Erasure Requests"], key="sar_page")
+if page == "Review Erasure Requests":
+    token = _get_token()
+    if not token:
+        st.error("No auth token available. Ensure the app is running inside Databricks.")
+        st.stop()
+    review_client = DatabricksClient(token)
+    try:
+        erasure_review.render(review_client)
+    finally:
+        review_client.close()
+    st.stop()
 
 st.title("GDPR Subject Access Request Search")
 st.caption(
