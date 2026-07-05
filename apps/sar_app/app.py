@@ -48,8 +48,8 @@ from search import SARSearcher
 # ---------------------------------------------------------------------------
 
 TAG_MAP: dict[str, str] = {
-    "Email":               "class.email_address",
     "Name":                "class.name",
+    "Email":               "class.email_address",
     "Date of Birth":       "class.date_of_birth",
     "Phone":               "class.phone_number",
     "Postcode / Location": "class.location",
@@ -580,7 +580,7 @@ with st.sidebar:
     fuzzy_threshold = 75  # overridden by the slider when Name is enabled
 
     for label, tag in TAG_MAP.items():
-        if st.checkbox(label, value=(label == "Email")):
+        if st.checkbox(label, value=(label == "Name")):
             if label == "Date of Birth":
                 today = date.today()
                 try:
