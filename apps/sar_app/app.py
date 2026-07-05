@@ -20,6 +20,7 @@ instead of re-querying Databricks.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from datetime import date
 
@@ -523,11 +524,14 @@ _ensure_watchdog_started()
 # as of this writing) — these tables hold PII, so exporting to a local CSV
 # bypasses the governed access/masking model entirely. This CSS hides it via
 # its accessible name rather than position, since toolbar button order isn't
-# guaranteed; it targets internal Streamlit DOM structure, not a public API,
-# so it may need updating on a future Streamlit upgrade.
+# guaranteed. Verified against Streamlit 1.58.0: the aria-label lives on the
+# nested button[data-testid="stBaseButton-elementToolbar"], not on the
+# button[data-testid="stElementToolbarButton"] wrapper (that testid is on a
+# div, not the button) — this targets internal DOM structure, not a public
+# API, so it may need re-verifying on a future Streamlit upgrade.
 st.markdown(
     """<style>
-    button[data-testid="stElementToolbarButton"][aria-label*="Download"] { display: none; }
+    button[data-testid="stBaseButton-elementToolbar"][aria-label="Download as CSV"] { display: none; }
     </style>""",
     unsafe_allow_html=True,
 )
@@ -714,23 +718,65 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
     st.caption(caption)
 
     for card in section_cards:
-        editor_key = f"editor_{search_id}_{provenance}_{card['full_name']}"
-        st.markdown(f"**{card['full_name']}** — matched on: {card['matched_column_or_tag']}")
-        edited = st.data_editor(
-            card["df"],
-            key=editor_key,
-            hide_index=True,
-            use_container_width=True,
-            disabled=[c for c in card["df"].columns if c != "Erase"],
-            column_config={
-                "Erase": st.column_config.CheckboxColumn(
-                    "Erase", help="Selected rows are included in the erasure request."
-                )
-            },
+        style = _STATUS_STYLE[card["provenance"]]
+        container_key = "card_" + re.sub(r"[^a-zA-Z0-9_-]", "_", f"{provenance}_{card['full_name']}")
+
+        # Colors match the lineage map (same STATUS_STYLE), so a card's left
+        # accent is a visual pointer back to the same-colored node/edges there.
+        st.markdown(
+            f'<style>.st-key-{container_key} {{ '
+            f'border-left: 4px solid {style["color"]} !important; border-radius: 8px; }}</style>',
+            unsafe_allow_html=True,
         )
-        edited_cards.append((card, edited))
-        n_selected = int(edited["Erase"].sum())
-        st.caption(f"{n_selected} of {len(edited)} row(s) selected for erasure.")
+
+        with st.container(key=container_key, border=True):
+            header = st.empty()
+
+            editor_key = f"editor_{search_id}_{provenance}_{card['full_name']}"
+            edited = st.data_editor(
+                card["df"],
+                key=editor_key,
+                hide_index=True,
+                use_container_width=True,
+                disabled=[c for c in card["df"].columns if c != "Erase"],
+                column_config={
+                    "Erase": st.column_config.CheckboxColumn(
+                        "Erase", help="Selected rows are included in the erasure request."
+                    )
+                },
+            )
+            edited_cards.append((card, edited))
+            n_selected = int(edited["Erase"].sum())
+
+            badge_html = (
+                f'<span style="display:inline-flex;align-items:center;gap:6px;font-size:0.6875rem;font-weight:700;'
+                f'text-transform:uppercase;letter-spacing:0.03em;padding:4px 10px;border-radius:999px;'
+                f'color:{style["color"]};background:{style["bg"]};">'
+                f'<span style="width:6px;height:6px;border-radius:50%;background:{style["color"]};"></span>'
+                f'{style["badge"]}</span>'
+                if style["badge"] else ""
+            )
+            chip_html = (
+                f'<span style="font-size:0.75rem;color:#8b93a7;background:rgba(127,140,160,0.12);'
+                f'border:1px solid rgba(127,140,160,0.22);border-radius:5px;padding:3px 9px;'
+                f'font-family:ui-monospace,monospace;">matched on: {card["matched_column_or_tag"]}</span>'
+            )
+            header.markdown(
+                f'''<div style="display:flex;align-items:center;justify-content:space-between;
+                            flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <span style="font-family:ui-monospace,monospace;font-size:0.9375rem;font-weight:600;">
+                      {card["full_name"]}
+                    </span>
+                    {badge_html}
+                    {chip_html}
+                  </div>
+                  <span style="font-size:0.8125rem;color:#8b93a7;white-space:nowrap;">
+                    {n_selected} of {len(edited)} selected
+                  </span>
+                </div>''',
+                unsafe_allow_html=True,
+            )
 
 # ---------------------------------------------------------------------------
 # Erasure review / confirm
