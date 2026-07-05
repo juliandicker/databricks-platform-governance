@@ -20,7 +20,6 @@ instead of re-querying Databricks.
 from __future__ import annotations
 
 import os
-import re
 import uuid
 from datetime import date
 
@@ -37,6 +36,7 @@ from idle_watchdog import touch as _touch_watchdog
 from lineage import LineageClient
 from lineage_view import STATUS_STYLE as _STATUS_STYLE
 from lineage_view import LineageEdge, LineageNode
+from lineage_view import card_container_key
 from lineage_view import render as render_lineage_view
 from matching import NameMatcher
 from normalise import SearchNormaliser
@@ -724,7 +724,7 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
 
     for card in section_cards:
         style = _STATUS_STYLE[card["provenance"]]
-        container_key = "card_" + re.sub(r"[^a-zA-Z0-9_-]", "_", f"{provenance}_{card['full_name']}")
+        container_key = card_container_key(provenance, card["full_name"])
 
         # Colors match the lineage map (same STATUS_STYLE), so a card's left
         # accent is a visual pointer back to the same-colored node/edges there.

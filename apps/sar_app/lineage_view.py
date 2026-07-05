@@ -14,7 +14,8 @@ the boxes, regardless of how many tables are shown or how they wrap.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass
 
 LAYER_ORDER = ["bronze", "silver", "gold"]
 
@@ -47,6 +48,14 @@ def _node_id(full_name: str) -> str:
     return "n_" + "".join(c if c.isalnum() else "_" for c in full_name)
 
 
+def card_container_key(provenance: str, full_name: str) -> str:
+    """Build the same sanitized key app.py uses for a review card's
+    ``st.container(key=...)``, so a lineage node's click handler can find
+    and scroll to the matching card in the parent document via its
+    ``.st-key-<key>`` class."""
+    return "card_" + re.sub(r"[^a-zA-Z0-9_-]", "_", f"{provenance}_{full_name}")
+
+
 def render(nodes: list[LineageNode], edges: list[LineageEdge]) -> tuple[str, int]:
     """Return ``(html_document, suggested_height_px)``."""
     columns = {layer: [n for n in nodes if n.layer == layer] for layer in LAYER_ORDER}
@@ -62,7 +71,14 @@ def render(nodes: list[LineageNode], edges: list[LineageEdge]) -> tuple[str, int
             if style["badge"] else ""
         )
         caption = n.caption or (f"{n.row_count} row(s)" if n.row_count is not None else "")
-        return f'''<div class="node" id="{_node_id(n.full_name)}" style="border-style:{border_style};border-color:{style["color"]}">
+        # Only matched nodes have a review card to jump to — "traversed"
+        # (no PII match) nodes aren't clickable.
+        card_key_attr = (
+            f' data-card-key="{card_container_key(n.status, n.full_name)}"'
+            if n.status != "traversed" else ""
+        )
+        clickable_class = " clickable" if n.status != "traversed" else ""
+        return f'''<div class="node{clickable_class}" id="{_node_id(n.full_name)}"{card_key_attr} style="border-style:{border_style};border-color:{style["color"]}">
   <div class="tname">{n.full_name}</div>
   {badge_html}
   <div class="meta">{caption}</div>
@@ -100,7 +116,10 @@ def render(nodes: list[LineageNode], edges: list[LineageEdge]) -> tuple[str, int
   .node {{
     background: #141a24; border: 1.5px solid #333c4d; border-radius: 6px;
     padding: 10px 13px; font-size: 13px; color: #eef0f5; box-sizing: border-box;
+    transition: filter 0.12s ease;
   }}
+  .node.clickable {{ cursor: pointer; }}
+  .node.clickable:hover {{ filter: brightness(1.25); }}
   .tname {{ font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px; margin-bottom: 6px; word-break: break-all; }}
   .meta {{ color: #7d8698; font-size: 11px; margin-top: 6px; }}
   .badge {{
@@ -166,6 +185,40 @@ def render(nodes: list[LineageNode], edges: list[LineageEdge]) -> tuple[str, int
 
   window.addEventListener('load', draw);
   new ResizeObserver(draw).observe(document.getElementById('wrap'));
+
+  // Clicking a matched node scrolls the parent document to its review card
+  // (st.container(key=...) renders as .st-key-<key> in the parent) and gives
+  // it a brief highlight flash. This iframe is same-origin with the parent
+  // (both served by the same Streamlit app), so window.parent.document is
+  // reachable — verified locally before relying on it.
+  //
+  // Delegated on document (not attached per-node) — attaching directly to
+  // each .node.clickable at parse time was unreliable here (verified
+  // locally: a real click landed on the element and bubbled correctly, but
+  // the originally-attached listener never fired), while a single
+  // document-level delegated listener fires reliably regardless of exactly
+  // when/how the node elements settled into the DOM.
+  //
+  // behavior: 'instant', not 'smooth' — verified locally that a
+  // cross-frame-triggered smooth scroll is flaky (sometimes a no-op,
+  // seemingly tied to user-activation propagating across the frame
+  // boundary inconsistently), while instant reliably scrolls every time.
+  document.addEventListener('click', (e) => {{
+    const node = e.target.closest('.node.clickable');
+    if (!node) return;
+    const key = node.getAttribute('data-card-key');
+    const target = window.parent.document.querySelector('.st-key-' + key);
+    if (!target) return;
+    target.scrollIntoView({{behavior: 'instant', block: 'center'}});
+    const previous = target.style.boxShadow;
+    const previousTransition = target.style.transition;
+    target.style.transition = 'box-shadow 0.2s ease';
+    target.style.boxShadow = '0 0 0 3px rgba(255,255,255,0.55)';
+    setTimeout(() => {{
+      target.style.boxShadow = previous;
+      target.style.transition = previousTransition;
+    }}, 1000);
+  }});
 </script>
 </body>
 </html>'''
