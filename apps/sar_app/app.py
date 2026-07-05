@@ -26,6 +26,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_option_menu import option_menu
 
 import erasure_review
 from database import DatabricksClient, get_service_principal_token, get_tagged_columns
@@ -542,11 +543,18 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# A sidebar radio rather than st.navigation/st.Page — this keeps the second
-# page a minimal, isolated addition (call the new module, st.stop()) instead
-# of restructuring the existing single-script search flow below into
-# multiple page-callables.
-page = st.sidebar.radio("Page", ["Search & Erase", "Review Erasure Requests"], key="sar_page")
+# A sidebar option_menu rather than st.navigation/st.Page — this keeps the
+# second page a minimal, isolated addition (call the new module, st.stop())
+# instead of restructuring the existing single-script search flow below
+# into multiple page-callables.
+with st.sidebar:
+    page = option_menu(
+        None,
+        ["Search & Erase", "Review Erasure Requests"],
+        icons=["search", "clock-history"],
+        default_index=0,
+        key="sar_page",
+    )
 if page == "Review Erasure Requests":
     token = _get_token()
     if not token:
