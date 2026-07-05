@@ -175,6 +175,100 @@ class LineageClient:
             return pd.DataFrame()
         return pd.DataFrame(bronze_rows)
 
+    def column_lineage_downstream(
+        self,
+        initial_conditions: dict[str, list[tuple[str, str, str]]],
+        max_depth: int = 10,
+    ) -> pd.DataFrame:
+        """Trace column lineage downstream from matched tables.
+
+        Performs a BFS over ``system.access.column_lineage`` in the forward
+        direction. Unlike ``column_lineage_to_bronze`` (which only collects
+        terminal bronze columns), every hop is collected here: a SAR-relevant
+        copy of a subject's data may exist in any derived table, not only at
+        a fixed terminal layer, and downstream copies often don't inherit the
+        originating ``class.*`` tag. Carries the original tag and clean
+        search value through intermediate hops so callers can build search
+        conditions without knowing the derived table's schema.
+
+        Args:
+            initial_conditions: Maps each matched silver/gold table full name
+                to a list of ``(column_name, tag, clean_val)`` tuples.
+            max_depth: Safety cap on BFS iterations.
+
+        Returns:
+            DataFrame with columns ``target_table_full_name``,
+            ``target_column_name``, ``tag``, ``clean_val``. Empty if no
+            downstream lineage found.
+        """
+        if not initial_conditions:
+            return pd.DataFrame()
+
+        # frontier: (table_full_name, column_name) -> (tag, clean_val)
+        frontier: dict[tuple[str, str], tuple[str, str]] = {
+            (table, col): (tag, clean_val)
+            for table, cols_info in initial_conditions.items()
+            for col, tag, clean_val in cols_info
+        }
+        visited: set[tuple[str, str]] = set(frontier)
+        downstream_rows: list[dict[str, str]] = []
+
+        for _ in range(max_depth):
+            if not frontier:
+                break
+
+            table_to_cols: dict[str, set[str]] = {}
+            for table, col in frontier:
+                table_to_cols.setdefault(table, set()).add(col)
+
+            table_in = ", ".join(f"'{t}'" for t in table_to_cols)
+            col_in = ", ".join(
+                f"'{c}'" for c in {c for cols in table_to_cols.values() for c in cols}
+            )
+
+            df = self._client.query(f"""
+                SELECT source_table_full_name,
+                       source_column_name,
+                       target_table_full_name,
+                       target_column_name
+                FROM   system.access.column_lineage
+                WHERE  source_table_full_name IN ({table_in})
+                  AND  source_column_name     IN ({col_in})
+                  AND  event_date             >= current_date() - {self._LOOKBACK_DAYS}
+                GROUP BY ALL
+            """)
+
+            if df.empty:
+                break
+
+            next_frontier: dict[tuple[str, str], tuple[str, str]] = {}
+
+            for _, row in df.iterrows():
+                src_key = (row.source_table_full_name, row.source_column_name)
+                if src_key not in frontier:
+                    continue  # cross-table false match from independent IN predicates
+
+                tag, clean_val = frontier[src_key]
+                tgt_key = (row.target_table_full_name, row.target_column_name)
+
+                if tgt_key in visited:
+                    continue
+                visited.add(tgt_key)
+
+                downstream_rows.append({
+                    "target_table_full_name": row.target_table_full_name,
+                    "target_column_name":     row.target_column_name,
+                    "tag":                    tag,
+                    "clean_val":              clean_val,
+                })
+                next_frontier[tgt_key] = (tag, clean_val)
+
+            frontier = next_frontier
+
+        if not downstream_rows:
+            return pd.DataFrame()
+        return pd.DataFrame(downstream_rows)
+
     def build_display_table(
         self,
         upstream_df: pd.DataFrame,

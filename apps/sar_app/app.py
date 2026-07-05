@@ -57,25 +57,32 @@ def _get_token() -> str:
     )
 
 
-def _build_bronze_plan(
+def _build_lineage_plan(
     lineage_df: pd.DataFrame,
+    table_col: str,
+    column_col: str,
 ) -> dict[tuple[str, str, str], list[tuple[list[str], str, str]]]:
-    """Group bronze column lineage results into per-table search conditions."""
+    """Group column lineage results into per-table search conditions.
+
+    Works for both the upstream-to-bronze result (``source_table_full_name``
+    / ``source_column_name``) and the downstream result
+    (``target_table_full_name`` / ``target_column_name``).
+    """
     groups: dict[tuple[str, str, str], dict[str, tuple[str, set[str]]]] = {}
     for _, row in lineage_df.iterrows():
-        parts = str(row.source_table_full_name).split(".", 2)
-        b_key = (parts[0], parts[1], parts[2])
+        parts = str(row[table_col]).split(".", 2)
+        key = (parts[0], parts[1], parts[2])
         tag, clean_val = str(row.tag), str(row.clean_val)
-        tag_map = groups.setdefault(b_key, {})
+        tag_map = groups.setdefault(key, {})
         if tag not in tag_map:
             tag_map[tag] = (clean_val, set())
-        tag_map[tag][1].add(str(row.source_column_name))
+        tag_map[tag][1].add(str(row[column_col]))
     return {
-        b_key: [
+        key: [
             (sorted(col_set), clean_val, tag)
             for tag, (clean_val, col_set) in tag_map.items()
         ]
-        for b_key, tag_map in groups.items()
+        for key, tag_map in groups.items()
     }
 
 
@@ -343,6 +350,14 @@ try:
                 "subject's records. Verify manually before including in a SAR response."
             )
 
+        initial_conditions: dict[str, list[tuple[str, str, str]]] = {}
+        for entry in matched_tables:
+            for cols, clean_val, tag in entry["conditions"]:
+                for col in cols:
+                    initial_conditions.setdefault(entry["full_name"], []).append(
+                        (col, tag, clean_val)
+                    )
+
         # -------------------------------------------------------------------
         # 4. Upstream bronze search via column lineage
         # -------------------------------------------------------------------
@@ -373,14 +388,6 @@ try:
                 _sp_client = DatabricksClient(_sp_token)
                 _sp_searcher = SARSearcher(_sp_client, _name_matcher)
 
-                initial_conditions: dict[str, list[tuple[str, str, str]]] = {}
-                for entry in matched_tables:
-                    for cols, clean_val, tag in entry["conditions"]:
-                        for col in cols:
-                            initial_conditions.setdefault(entry["full_name"], []).append(
-                                (col, tag, clean_val)
-                            )
-
                 with st.spinner("Tracing column lineage to bronze…"):
                     try:
                         col_lineage_df = _lineage.column_lineage_to_bronze(
@@ -393,7 +400,9 @@ try:
                 if col_lineage_df.empty:
                     st.info("No upstream bronze columns found via column lineage.")
                 else:
-                    bronze_plan = _build_bronze_plan(col_lineage_df)
+                    bronze_plan = _build_lineage_plan(
+                        col_lineage_df, "source_table_full_name", "source_column_name"
+                    )
                     bronze_any_results = False
                     b_progress = st.progress(0, text="Searching bronze tables…")
                     bronze_items = list(bronze_plan.items())
@@ -435,6 +444,73 @@ try:
         finally:
             if _sp_client is not None:
                 _sp_client.close()
+
+        # -------------------------------------------------------------------
+        # 5. Downstream copies search via column lineage
+        # -------------------------------------------------------------------
+
+        st.divider()
+        st.subheader("Downstream Copies — via column lineage")
+        st.caption(
+            "Searches downstream tables identified via "
+            "`system.access.column_lineage`, catching derived copies of the "
+            "subject's data that may not carry the original `class.*` tags. "
+            "Queries run as your user identity."
+        )
+
+        with st.spinner("Tracing column lineage downstream…"):
+            try:
+                downstream_lineage_df = _lineage.column_lineage_downstream(
+                    initial_conditions
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.warning(f"Downstream column lineage query failed: {exc}")
+                downstream_lineage_df = pd.DataFrame()
+
+        if downstream_lineage_df.empty:
+            st.info("No downstream columns found via column lineage.")
+        else:
+            downstream_plan = _build_lineage_plan(
+                downstream_lineage_df, "target_table_full_name", "target_column_name"
+            )
+            downstream_any_results = False
+            d_progress = st.progress(0, text="Searching downstream tables…")
+            downstream_items = list(downstream_plan.items())
+
+            for d_i, ((d_cat, d_sch, d_tbl), d_conditions) in enumerate(
+                downstream_items
+            ):
+                d_progress.progress(
+                    (d_i + 1) / len(downstream_items),
+                    text=f"Searching `{d_cat}.{d_sch}.{d_tbl}`…",
+                )
+                try:
+                    d_df = _searcher.search(
+                        d_cat, d_sch, d_tbl, d_conditions, fuzzy_threshold
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(
+                        f"`{d_cat}.{d_sch}.{d_tbl}` — downstream query failed: {exc}"
+                    )
+                    continue
+
+                if not d_df.empty:
+                    downstream_any_results = True
+                    d_display_df = (
+                        d_df.rename(columns={"_match_score": "Match Score %"})
+                        if "_match_score" in d_df
+                        else d_df
+                    )
+                    with st.expander(
+                        f"**{d_cat}.{d_sch}.{d_tbl}** "
+                        f"— {len(d_df)} row(s) (downstream copy)",
+                        expanded=True,
+                    ):
+                        st.dataframe(d_display_df, use_container_width=True)
+
+            d_progress.empty()
+            if not downstream_any_results:
+                st.info("No downstream records found for this subject.")
 
 finally:
     _db_client.close()
