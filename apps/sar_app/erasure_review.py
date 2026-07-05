@@ -25,7 +25,7 @@ from erasure import (
     write_restoration,
 )
 
-EXECUTION_ICON = {"SUCCEEDED": "✅", "FAILED": "❌", "SKIPPED": "⚠️"}
+EXECUTION_ICON = {"SUCCEEDED": "✅", "FAILED": "❌", "SKIPPED": "⚠️", "ABORTED": "⚠️"}
 
 RESTORE_REASONS = [
     "Erasure executed in error",
@@ -168,8 +168,14 @@ def render(client: DatabricksClient) -> None:
                 st.caption("✅ Already restored — see `admin.erasure.restorations` for details.")
                 continue
 
-            was_deleted = item["execution_status"] == "SUCCEEDED" and item["rows_deleted"] > 0
-            if not was_deleted:
+            # execution_status == SUCCEEDED alone is the right eligibility check —
+            # that status is only ever reached after the dry-run guard passed and
+            # the DELETE executed without error, so rows were genuinely removed
+            # regardless of what rows_deleted itself records. Older request_items
+            # rows (written before the rows_deleted = matched_count fix) have -1
+            # here from the SQL connector's unreliable cursor.rowcount, so
+            # requiring rows_deleted > 0 would wrongly hide restorable items.
+            if item["execution_status"] != "SUCCEEDED":
                 continue
 
             within_window = now < _to_utc(item["estimated_purge_by"])

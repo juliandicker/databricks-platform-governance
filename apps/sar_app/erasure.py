@@ -57,13 +57,54 @@ class TableErasureResult:
     vacuum_retention_raw: str
     vacuum_retention_days: int
     estimated_purge_by: datetime
-    execution_status: str        # SUCCEEDED | FAILED | SKIPPED
+    execution_status: str        # SUCCEEDED | FAILED | SKIPPED | ABORTED
     error_message: str | None
 
 
+@dataclass
+class DryRunCheck:
+    """Result of verifying one target's delete predicate *before* deleting anything.
+
+    ``ErasureExecutor.run`` dry-runs every target in a request first and only
+    proceeds to delete any of them if every single one checks out — this is
+    what makes the request all-or-nothing without native DB transactions
+    (which Databricks doesn't support here anyway: tables with column masks,
+    which silver/gold both have, cannot participate in a
+    BEGIN TRANSACTION/BEGIN ATOMIC block at all). Checking every table before
+    touching any of them means a mismatch on one table can never leave an
+    earlier table already deleted — the exact failure mode a real erasure hit
+    (silver+gold deleted while bronze's mismatch was only caught after the
+    fact, per-table, with no way to undo the other two automatically).
+    """
+
+    full_name: str
+    row_targeting_method: str
+    delete_sql: str
+    rows_selected: int
+    matched_count: int
+    vacuum_retention_raw: str
+    vacuum_retention_days: int
+    error_message: str | None     # None means this target's dry run passed
+
+    @property
+    def ok(self) -> bool:
+        return self.error_message is None
+
+
 def _sql_string(val: object) -> str:
-    """Return a quoted, escaped SQL string literal for *val*."""
-    return "'" + str(val).replace("'", "''") + "'"
+    """Return a quoted, escaped SQL string literal for *val*.
+
+    Backslashes must be escaped, not just single quotes — Databricks SQL
+    string literals process C-style escape sequences (\\n, \\u2013, etc.),
+    so any text containing literal backslashes (e.g. a JSON blob with its
+    own \\n/\\u-escaped content) gets silently reinterpreted into different
+    characters than what's actually stored, permanently breaking any
+    equality comparison against that column. Verified: this was the real
+    reason a bronze table with a raw_payload JSON column kept failing its
+    dry-run count even after the timestamp-precision predicate was fixed.
+    """
+    escaped = str(val).replace("\\", "\\\\").replace("'", "''")
+    return "'" + escaped + "'"
 
 
 def _sql_timestamp(dt: datetime) -> str:
@@ -392,73 +433,80 @@ class ErasureExecutor:
         sql = f"DELETE FROM {target.full_name} WHERE {where}"
         return method, sql, clauses
 
-    def execute_table(self, target: TableErasureTarget) -> TableErasureResult:
-        """Delete *target*'s selected rows, guarded by a pre-delete dry run."""
+    def dry_run_check(self, target: TableErasureTarget) -> DryRunCheck:
+        """Verify *target*'s delete predicate without deleting anything.
+
+        A full-row-equality predicate on a table with duplicate rows (no
+        natural key) could otherwise silently delete more rows than the
+        reviewer actually selected — this confirms the predicate matches
+        exactly ``rows_selected`` rows before ``run`` lets any target in the
+        request proceed to an actual delete.
+        """
         vacuum_raw, vacuum_days = get_vacuum_retention(self._client, target.full_name)
-        executed_at = datetime.now(timezone.utc)
-        estimated_purge_by = executed_at + pd.Timedelta(days=vacuum_days)
         rows_selected = len(target.selected_rows)
 
         try:
             method, delete_sql, clauses = self.build_delete_sql(target)
         except Exception as exc:  # noqa: BLE001
-            return TableErasureResult(
-                full_name=target.full_name, rows_selected=rows_selected, rows_deleted=0,
-                row_targeting_method="unknown", delete_sql="", vacuum_retention_raw=vacuum_raw,
-                vacuum_retention_days=vacuum_days, estimated_purge_by=estimated_purge_by,
-                execution_status="FAILED", error_message=f"Could not build delete predicate: {exc}",
+            return DryRunCheck(
+                full_name=target.full_name, row_targeting_method="unknown", delete_sql="",
+                rows_selected=rows_selected, matched_count=0, vacuum_retention_raw=vacuum_raw,
+                vacuum_retention_days=vacuum_days,
+                error_message=f"Could not build delete predicate: {exc}",
             )
 
-        # Dry-run guard: a full-row-equality predicate on a table with
-        # duplicate rows (no natural key) could otherwise silently delete
-        # more rows than the reviewer actually selected.
         where = " OR ".join(clauses)
         try:
             count_df = self._client.query(f"SELECT COUNT(*) AS n FROM {target.full_name} WHERE {where}")
             matched_count = int(count_df.iloc[0]["n"])
         except Exception as exc:  # noqa: BLE001
-            return TableErasureResult(
-                full_name=target.full_name, rows_selected=rows_selected, rows_deleted=0,
-                row_targeting_method=method, delete_sql=delete_sql, vacuum_retention_raw=vacuum_raw,
-                vacuum_retention_days=vacuum_days, estimated_purge_by=estimated_purge_by,
-                execution_status="FAILED", error_message=f"Dry-run count query failed: {exc}",
+            return DryRunCheck(
+                full_name=target.full_name, row_targeting_method=method, delete_sql=delete_sql,
+                rows_selected=rows_selected, matched_count=0, vacuum_retention_raw=vacuum_raw,
+                vacuum_retention_days=vacuum_days,
+                error_message=f"Dry-run count query failed: {exc}",
             )
 
+        error_message = None
         if matched_count != rows_selected:
-            return TableErasureResult(
-                full_name=target.full_name, rows_selected=rows_selected, rows_deleted=0,
-                row_targeting_method=method, delete_sql=delete_sql, vacuum_retention_raw=vacuum_raw,
-                vacuum_retention_days=vacuum_days, estimated_purge_by=estimated_purge_by,
-                execution_status="SKIPPED",
-                error_message=(
-                    f"Dry-run count ({matched_count}) did not match rows selected "
-                    f"({rows_selected}) — aborted without deleting to avoid removing "
-                    f"more than reviewed."
-                ),
+            error_message = (
+                f"Dry-run count ({matched_count}) did not match rows selected ({rows_selected})."
             )
+        return DryRunCheck(
+            full_name=target.full_name, row_targeting_method=method, delete_sql=delete_sql,
+            rows_selected=rows_selected, matched_count=matched_count, vacuum_retention_raw=vacuum_raw,
+            vacuum_retention_days=vacuum_days, error_message=error_message,
+        )
 
+    def execute_table(self, dry_run: DryRunCheck) -> TableErasureResult:
+        """Delete the rows verified by *dry_run*.
+
+        Caller (``run``) must only call this once every target in the same
+        request has passed ``dry_run_check`` — this performs no count
+        verification of its own, it trusts ``dry_run.matched_count``.
+        """
+        estimated_purge_by = datetime.now(timezone.utc) + pd.Timedelta(days=dry_run.vacuum_retention_days)
         try:
-            # Not self._client.execute(delete_sql)'s return value — the
-            # Databricks SQL connector's cursor.rowcount comes back -1 for
-            # DELETE (the standard DB-API convention for "driver doesn't
-            # report affected rows"). matched_count is exactly right instead:
-            # the dry-run guard above just confirmed this identical
-            # predicate matches precisely rows_selected rows.
-            self._client.execute(delete_sql)
-            rows_deleted = matched_count
+            # Not self._client.execute(...)'s return value — the Databricks
+            # SQL connector's cursor.rowcount comes back -1 for DELETE (the
+            # standard DB-API convention for "driver doesn't report affected
+            # rows"). dry_run.matched_count is exactly right instead: the
+            # dry-run check already confirmed this identical predicate
+            # matches precisely rows_selected rows.
+            self._client.execute(dry_run.delete_sql)
         except Exception as exc:  # noqa: BLE001
             return TableErasureResult(
-                full_name=target.full_name, rows_selected=rows_selected, rows_deleted=0,
-                row_targeting_method=method, delete_sql=delete_sql, vacuum_retention_raw=vacuum_raw,
-                vacuum_retention_days=vacuum_days, estimated_purge_by=estimated_purge_by,
-                execution_status="FAILED", error_message=str(exc),
+                full_name=dry_run.full_name, rows_selected=dry_run.rows_selected, rows_deleted=0,
+                row_targeting_method=dry_run.row_targeting_method, delete_sql=dry_run.delete_sql,
+                vacuum_retention_raw=dry_run.vacuum_retention_raw, vacuum_retention_days=dry_run.vacuum_retention_days,
+                estimated_purge_by=estimated_purge_by, execution_status="FAILED", error_message=str(exc),
             )
 
         return TableErasureResult(
-            full_name=target.full_name, rows_selected=rows_selected, rows_deleted=rows_deleted,
-            row_targeting_method=method, delete_sql=delete_sql, vacuum_retention_raw=vacuum_raw,
-            vacuum_retention_days=vacuum_days, estimated_purge_by=estimated_purge_by,
-            execution_status="SUCCEEDED", error_message=None,
+            full_name=dry_run.full_name, rows_selected=dry_run.rows_selected, rows_deleted=dry_run.matched_count,
+            row_targeting_method=dry_run.row_targeting_method, delete_sql=dry_run.delete_sql,
+            vacuum_retention_raw=dry_run.vacuum_retention_raw, vacuum_retention_days=dry_run.vacuum_retention_days,
+            estimated_purge_by=estimated_purge_by, execution_status="SUCCEEDED", error_message=None,
         )
 
     def run(
@@ -468,10 +516,20 @@ class ErasureExecutor:
         legal_basis: str,
         targets: list[TableErasureTarget],
     ) -> tuple[str, list[TableErasureResult]]:
-        """Execute every target, writing the audit trail incrementally.
+        """Dry-run every target, and only if *all* pass, delete any of them.
+
+        This request is all-or-nothing: every target is dry-run *before* any
+        delete is attempted, so a mismatch on one table can never leave an
+        earlier table already deleted. (Native Databricks transactions can't
+        provide this instead — tables with column masks, which silver/gold
+        both have, cannot participate in a transaction at all, per
+        https://docs.databricks.com/aws/en/transactions/.)
 
         Returns ``(request_id, results)``. ``subject_ref`` is the plaintext
         identifier used only to compute ``subject_ref_hash`` — never stored.
+        The audit trail is still written incrementally, one request_items row
+        per target as each is resolved, so a mid-run failure during the
+        delete phase doesn't lose evidence for targets already written.
         """
         request_id = str(uuid.uuid4())
         requested_at = datetime.now(timezone.utc)
@@ -485,14 +543,32 @@ class ErasureExecutor:
                     {_sql_timestamp(requested_at)}, 'PENDING', NULL)
         """)
 
+        dry_runs = [self.dry_run_check(target) for target in targets]
+        all_ok = all(d.ok for d in dry_runs)
+
         results: list[TableErasureResult] = []
-        for target in targets:
-            result = self.execute_table(target)
+        for target, dry_run in zip(targets, dry_runs):
+            if all_ok:
+                result = self.execute_table(dry_run)
+            else:
+                reason = dry_run.error_message or (
+                    "Aborted before deleting — a different table in this request failed "
+                    "its dry-run check, so nothing in this request was deleted."
+                )
+                result = TableErasureResult(
+                    full_name=dry_run.full_name, rows_selected=dry_run.rows_selected, rows_deleted=0,
+                    row_targeting_method=dry_run.row_targeting_method, delete_sql=dry_run.delete_sql,
+                    vacuum_retention_raw=dry_run.vacuum_retention_raw,
+                    vacuum_retention_days=dry_run.vacuum_retention_days,
+                    estimated_purge_by=datetime.now(timezone.utc) + pd.Timedelta(days=dry_run.vacuum_retention_days),
+                    execution_status="ABORTED", error_message=reason,
+                )
             results.append(result)
             self._write_request_item(request_id, target, result)
 
         overall_status = (
-            "COMPLETED" if all(r.execution_status == "SUCCEEDED" for r in results)
+            "COMPLETED" if all_ok and all(r.execution_status == "SUCCEEDED" for r in results)
+            else "ABORTED" if not all_ok
             else "FAILED" if all(r.execution_status == "FAILED" for r in results)
             else "PARTIAL"
         )

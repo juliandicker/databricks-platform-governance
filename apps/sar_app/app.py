@@ -97,7 +97,7 @@ PROVENANCE_SECTIONS = [
     ),
 ]
 
-EXECUTION_ICON = {"SUCCEEDED": "✅", "FAILED": "❌", "SKIPPED": "⚠️"}
+EXECUTION_ICON = {"SUCCEEDED": "✅", "FAILED": "❌", "SKIPPED": "⚠️", "ABORTED": "⚠️"}
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +543,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Tighter overall spacing — Streamlit's defaults (measured on this app: 96px/160px
+# top/bottom page padding, 16px gap between every stacked element and between
+# columns, 32px margin around every st.divider()) read as sparse for a page meant
+# to be scanned quickly rather than read top-to-bottom. Values below are direct
+# overrides of those measured defaults, not guesses.
+st.markdown(
+    """<style>
+    .block-container { padding-top: 2rem !important; padding-bottom: 2.5rem !important; }
+    [data-testid="stVerticalBlock"] { gap: 0.5rem !important; }
+    [data-testid="stHorizontalBlock"] { gap: 0.75rem !important; }
+    hr { margin: 0.75rem 0 !important; }
+    h1 { font-size: 2rem !important; }
+    h3 { font-size: 1.25rem !important; }
+    </style>""",
+    unsafe_allow_html=True,
+)
+
 # A sidebar option_menu rather than st.navigation/st.Page — this keeps the
 # second page a minimal, isolated addition (call the new module, st.stop())
 # instead of restructuring the existing single-script search flow below
@@ -584,7 +601,20 @@ with st.sidebar:
 # scrolling through a long single-column list.
 # ---------------------------------------------------------------------------
 
-st.subheader("Search Identifiers")
+st.subheader(
+    "Search Identifiers",
+    help=(
+        "Enter one or more identifier values below, then click **Search**.\n\n"
+        "**Name matching** strips honorifics (Mr/Mrs/Dr…), expands common "
+        "nicknames (Tony → Anthony, Ant…), and ranks results by fuzzy similarity. "
+        "Works across split-name tables (first_name + last_name) as well as "
+        "full-name columns.\n\n"
+        "When multiple identifiers are provided, a row must satisfy **all** of the "
+        "identifiers tagged on its own table — a table without one of the selected "
+        "identifiers is still searched on the ones it does have, since PII fields "
+        "are often split across tables."
+    ),
+)
 st.caption("Enter one or more identifier values to search — leave any you don't need blank.")
 
 selected: dict[str, str] = {}
@@ -632,10 +662,11 @@ for col, (label, tag) in zip(identifier_cols, TAG_MAP.items()):
                 ),
             )
 
-st.divider()
-
-layer_col, search_col = st.columns([3, 1])
-with layer_col:
+# Layer + Search reuse two of the same identifier columns (re-entering a
+# column after its first use just appends further down it) rather than a
+# new row — every column but Name's is otherwise empty below its input,
+# since only Name grows a second widget (the threshold slider above).
+with identifier_cols[3]:
     catalog = st.radio(
         "Layer to search",
         options=SEARCHABLE_LAYERS,
@@ -643,7 +674,7 @@ with layer_col:
         horizontal=True,
         help="Only tables with class.* tags are included.",
     )
-with search_col:
+with identifier_cols[4]:
     st.write("")  # vertical spacer so the button aligns with the radio, not its label
     search_clicked = st.button("Search", type="primary", use_container_width=True)
 
@@ -689,17 +720,6 @@ if search_clicked:
     st.session_state.pop("sar_pending_previews", None)
 
 if "sar_cards" not in st.session_state:
-    st.info(
-        "Enter one or more identifier values above, then click **Search**.\n\n"
-        "**Name matching** strips honorifics (Mr/Mrs/Dr…), expands common "
-        "nicknames (Tony → Anthony, Ant…), and ranks results by fuzzy similarity. "
-        "Works across split-name tables (first_name + last_name) as well as "
-        "full-name columns.\n\n"
-        "When multiple identifiers are provided, a row must satisfy **all** of the "
-        "identifiers tagged on its own table — a table without one of the selected "
-        "identifiers is still searched on the ones it does have, since PII fields "
-        "are often split across tables."
-    )
     st.stop()
 
 _touch_watchdog()
