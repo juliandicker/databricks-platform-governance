@@ -28,7 +28,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from database import DatabricksClient, get_service_principal_token, get_tagged_columns
-from erasure import ErasureExecutor, TableErasureTarget
+from erasure import ErasureExecutor, TableErasureTarget, format_delete_sql_pretty, get_vacuum_retention
 from idle_watchdog import ensure_started as _ensure_watchdog_started
 from idle_watchdog import seconds_remaining as _watchdog_seconds_remaining
 from idle_watchdog import stop_app_now as _stop_app_now
@@ -176,6 +176,12 @@ def _prep_card(
     }
 
 
+def _node_caption(client: DatabricksClient, full_name: str, row_count: int) -> str:
+    """Row count plus the table's actual VACUUM retention, for the lineage map."""
+    vacuum_raw, _ = get_vacuum_retention(client, full_name)
+    return f"{row_count} row(s) · VACUUM: {vacuum_raw}"
+
+
 @st.fragment(run_every=1)
 def _render_watchdog_controls() -> None:
     """Sidebar countdown to the idle auto-stop, plus a manual stop button."""
@@ -249,7 +255,10 @@ def _run_search_pipeline(
                     for tag in selected if tag in available_tags
                 )
                 cards.append(_prep_card(full_name, catalog, schema, table, "direct", tag_labels, result_df))
-                lineage_nodes[full_name] = LineageNode(full_name, catalog, "direct", row_count=len(result_df))
+                lineage_nodes[full_name] = LineageNode(
+                    full_name, catalog, "direct", row_count=len(result_df),
+                    caption=_node_caption(db_client, full_name, len(result_df)),
+                )
 
         progress.empty()
         if not matched_tables:
@@ -331,7 +340,10 @@ def _run_search_pipeline(
                             full_name = f"{b_cat}.{b_sch}.{b_tbl}"
                             tag_labels = ", ".join(tag for _, _, tag in b_conditions)
                             cards.append(_prep_card(full_name, b_cat, b_sch, b_tbl, "upstream", tag_labels, b_df))
-                            lineage_nodes[full_name] = LineageNode(full_name, b_cat, "upstream", row_count=len(b_df))
+                            lineage_nodes[full_name] = LineageNode(
+                                full_name, b_cat, "upstream", row_count=len(b_df),
+                                caption=_node_caption(sp_client, full_name, len(b_df)),
+                            )
                             cols_used = ", ".join(sorted({c for cols, _, _ in b_conditions for c in cols}))
                             for matched in matched_full_names:
                                 lineage_edges[(full_name, matched)] = LineageEdge(
@@ -365,7 +377,10 @@ def _run_search_pipeline(
                     full_name = f"{d_cat}.{d_sch}.{d_tbl}"
                     tag_labels = ", ".join(tag for _, _, tag in d_conditions)
                     cards.append(_prep_card(full_name, d_cat, d_sch, d_tbl, "downstream", tag_labels, d_df))
-                    lineage_nodes[full_name] = LineageNode(full_name, d_cat, "downstream", row_count=len(d_df))
+                    lineage_nodes[full_name] = LineageNode(
+                        full_name, d_cat, "downstream", row_count=len(d_df),
+                        caption=_node_caption(db_client, full_name, len(d_df)),
+                    )
                     cols_used = ", ".join(sorted({c for cols, _, _ in d_conditions for c in cols}))
                     for matched in matched_full_names:
                         lineage_edges[(matched, full_name)] = LineageEdge(
@@ -387,7 +402,7 @@ def _run_search_pipeline(
 # Confirm dialog
 # ---------------------------------------------------------------------------
 
-@st.dialog("Confirm erasure request")
+@st.dialog("Confirm erasure request", width="large")
 def _render_confirm_dialog() -> None:
     targets: list[TableErasureTarget] = st.session_state.get("sar_pending_targets", [])
     previews: list[tuple[TableErasureTarget, str, str]] = st.session_state.get("sar_pending_previews", [])
@@ -396,10 +411,10 @@ def _render_confirm_dialog() -> None:
     st.write(f"This will submit **{total_rows}** row(s) across **{len(targets)}** table(s) for erasure.")
     st.caption(SYSTEM_TABLE_REMINDER)
 
-    for target, method, sql in previews:
+    for target, method, sql_pretty in previews:
         with st.expander(f"View SQL to be executed — `{target.full_name}`", expanded=False):
             st.caption(f"Row targeting method: {method.replace('_', ' ')}")
-            st.code(sql, language="sql")
+            st.code(sql_pretty, language="sql", wrap_lines=True)
 
     legal_basis = st.selectbox("Legal basis (GDPR Art. 17(1))", LEGAL_BASES)
     confirm_text = st.text_input("Type DELETE to confirm", placeholder="DELETE")
@@ -443,6 +458,20 @@ def _render_confirm_dialog() -> None:
 
 st.set_page_config(page_title="SAR Search", page_icon="🔍", layout="wide")
 _ensure_watchdog_started()
+
+# Streamlit's dataframe/data_editor toolbar has no public parameter to disable
+# just the "Download as CSV" button (streamlit/streamlit#8402, still unreleased
+# as of this writing) — these tables hold PII, so exporting to a local CSV
+# bypasses the governed access/masking model entirely. This CSS hides it via
+# its accessible name rather than position, since toolbar button order isn't
+# guaranteed; it targets internal Streamlit DOM structure, not a public API,
+# so it may need updating on a future Streamlit upgrade.
+st.markdown(
+    """<style>
+    button[data-testid="stElementToolbarButton"][aria-label*="Download"] { display: none; }
+    </style>""",
+    unsafe_allow_html=True,
+)
 
 st.title("GDPR Subject Access Request Search")
 st.caption(
@@ -678,10 +707,11 @@ with col2:
             executor = ErasureExecutor(preview_client)
             for target in targets:
                 try:
-                    method, sql, _clauses = executor.build_delete_sql(target)
+                    method, _sql, clauses = executor.build_delete_sql(target)
+                    sql_pretty = format_delete_sql_pretty(target.full_name, clauses)
                 except Exception as exc:  # noqa: BLE001
-                    method, sql = "unknown", f"-- failed to build preview: {exc}"
-                previews.append((target, method, sql))
+                    method, sql_pretty = "unknown", f"-- failed to build preview: {exc}"
+                previews.append((target, method, sql_pretty))
         finally:
             preview_client.close()
 

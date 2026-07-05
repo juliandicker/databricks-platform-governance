@@ -89,6 +89,35 @@ def _parse_retention_days(raw: str | None) -> int:
     return int(match.group(1)) if match else _DEFAULT_VACUUM_RETENTION_DAYS
 
 
+def get_vacuum_retention(client: DatabricksClient, full_name: str) -> tuple[str, int]:
+    """Return ``(raw property value or default, retention in days)`` for *full_name*.
+
+    Module-level (not tied to ``ErasureExecutor``) so the lineage map can show
+    each table's actual VACUUM retention alongside the erasure-execution path
+    that also needs it.
+    """
+    try:
+        props = client.query(f"SHOW TBLPROPERTIES {full_name}")
+        raw = next(
+            (r["value"] for _, r in props.iterrows() if r["key"] == "delta.deletedFileRetentionDuration"),
+            None,
+        )
+    except Exception:  # noqa: BLE001
+        raw = None
+    return raw or f"{_DEFAULT_VACUUM_RETENTION_DAYS} days (default — not explicitly set)", _parse_retention_days(raw)
+
+
+def format_delete_sql_pretty(full_name: str, clauses: list[str]) -> str:
+    """Multi-line, human-readable rendering of a DELETE statement for on-screen
+    review — one OR-ed row predicate per line. Execution uses the compact
+    single-line form from ``build_delete_sql``; this is display-only."""
+    if not clauses:
+        return f"DELETE FROM {full_name} WHERE FALSE;"
+    lines = [f"DELETE FROM {full_name}", f"WHERE {clauses[0]}"]
+    lines.extend(f"   OR {clause}" for clause in clauses[1:])
+    return "\n".join(lines) + ";"
+
+
 class ErasureExecutor:
     """Executes a confirmed erasure request and writes its audit trail.
 
@@ -127,7 +156,7 @@ class ErasureExecutor:
 
     def execute_table(self, target: TableErasureTarget) -> TableErasureResult:
         """Delete *target*'s selected rows, guarded by a pre-delete dry run."""
-        vacuum_raw, vacuum_days = self._vacuum_retention(target.full_name)
+        vacuum_raw, vacuum_days = get_vacuum_retention(self._client, target.full_name)
         executed_at = datetime.now(timezone.utc)
         estimated_purge_by = executed_at + pd.Timedelta(days=vacuum_days)
         rows_selected = len(target.selected_rows)
@@ -251,18 +280,6 @@ class ErasureExecutor:
             ORDER BY kcu.ordinal_position
         """)
         return list(df["column_name"]) if not df.empty else None
-
-    def _vacuum_retention(self, full_name: str) -> tuple[str, int]:
-        """Return ``(raw property value or default, retention in days)`` for *full_name*."""
-        try:
-            props = self._client.query(f"SHOW TBLPROPERTIES {full_name}")
-            raw = next(
-                (r["value"] for _, r in props.iterrows() if r["key"] == "delta.deletedFileRetentionDuration"),
-                None,
-            )
-        except Exception:  # noqa: BLE001
-            raw = None
-        return raw or f"{_DEFAULT_VACUUM_RETENTION_DAYS} days (default — not explicitly set)", _parse_retention_days(raw)
 
     def _hash_value(self, udf_name: str, val: str) -> str:
         df = self._client.query(f"SELECT admin.shared.{udf_name}({_sql_string(val)}) AS h")
