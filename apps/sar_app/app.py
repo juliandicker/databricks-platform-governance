@@ -20,6 +20,7 @@ instead of re-querying Databricks.
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from datetime import date
 
@@ -718,18 +719,21 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
 
     for card in section_cards:
         style = _STATUS_STYLE[card["provenance"]]
+        container_key = "card_" + re.sub(r"[^a-zA-Z0-9_-]", "_", f"{provenance}_{card['full_name']}")
 
-        # st.container(key=...) needs a newer Streamlit than this app's deployed
-        # environment resolves to (confirmed by a TypeError there — border=True
-        # alone is fine, key= is not), so per-card CSS-class targeting isn't
-        # available. Instead the colored accent lives entirely inside one
-        # self-contained st.markdown call (matches the lineage map's
-        # STATUS_STYLE colors) — safe on any Streamlit version, since it's a
-        # single well-formed HTML fragment rather than tags split across
-        # separate st.markdown/st.data_editor calls (which does NOT nest the
-        # way it looks like it should: each call's HTML is parsed and
-        # auto-closed independently, verified empirically before this fix).
-        with st.container(border=True):
+        # Colors match the lineage map (same STATUS_STYLE), so a card's left
+        # accent is a visual pointer back to the same-colored node/edges there.
+        # Requires streamlit==1.58.0 (pinned in requirements.txt) — st.container's
+        # key parameter, which produces the .st-key-<key> class this targets,
+        # isn't available on older versions (confirmed via a prior TypeError
+        # against this app's previously-deployed 1.38.0).
+        st.markdown(
+            f'<style>.st-key-{container_key} {{ '
+            f'border-left: 4px solid {style["color"]} !important; border-radius: 8px; }}</style>',
+            unsafe_allow_html=True,
+        )
+
+        with st.container(key=container_key, border=True):
             header = st.empty()
 
             editor_key = f"editor_{search_id}_{provenance}_{card['full_name']}"
@@ -762,20 +766,18 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
                 f'font-family:ui-monospace,monospace;">matched on: {card["matched_column_or_tag"]}</span>'
             )
             header.markdown(
-                f'''<div style="border-left:4px solid {style["color"]};padding:2px 0 2px 14px;margin-bottom:10px;">
-                  <div style="display:flex;align-items:center;justify-content:space-between;
-                              flex-wrap:wrap;gap:10px;">
-                    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                      <span style="font-family:ui-monospace,monospace;font-size:0.9375rem;font-weight:600;">
-                        {card["full_name"]}
-                      </span>
-                      {badge_html}
-                      {chip_html}
-                    </div>
-                    <span style="font-size:0.8125rem;color:#8b93a7;white-space:nowrap;">
-                      {n_selected} of {len(edited)} selected
+                f'''<div style="display:flex;align-items:center;justify-content:space-between;
+                            flex-wrap:wrap;gap:10px;margin-bottom:10px;">
+                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                    <span style="font-family:ui-monospace,monospace;font-size:0.9375rem;font-weight:600;">
+                      {card["full_name"]}
                     </span>
+                    {badge_html}
+                    {chip_html}
                   </div>
+                  <span style="font-size:0.8125rem;color:#8b93a7;white-space:nowrap;">
+                    {n_selected} of {len(edited)} selected
+                  </span>
                 </div>''',
                 unsafe_allow_html=True,
             )
