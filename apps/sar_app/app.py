@@ -185,6 +185,48 @@ def _node_caption(client: DatabricksClient, full_name: str, row_count: int) -> s
     return f"{row_count} row(s) · VACUUM: {vacuum_raw}"
 
 
+def _render_case_bar(
+    subject_name: str,
+    matched_on: str,
+    tables: int,
+    catalogs: int,
+    records_found: int,
+    selected: int,
+    total: int,
+) -> None:
+    """Subject summary + running erasure-selection count, styled like a case file
+    header rather than a bare st.metric — native Streamlit has no stat-row/pill
+    primitive, so this is a small inline HTML block rather than a new component
+    (unlike the lineage map, nothing here needs live DOM measurement)."""
+    def stat(value: int, label: str) -> str:
+        return f'''<div style="display:flex;flex-direction:column;gap:2px;">
+          <span style="font-size:1.25rem;font-weight:700;font-variant-numeric:tabular-nums;color:inherit;">{value}</span>
+          <span style="font-size:0.6875rem;text-transform:uppercase;letter-spacing:0.05em;color:#8b93a7;">{label}</span>
+        </div>'''
+
+    st.markdown(
+        f'''<div style="display:flex;align-items:center;gap:28px;flex-wrap:wrap;
+                    background:rgba(127,140,160,0.08);border:1px solid rgba(127,140,160,0.18);
+                    border-radius:10px;padding:16px 22px;margin:4px 0 14px;color:inherit;">
+          <div style="display:flex;flex-direction:column;gap:2px;">
+            <span style="font-size:1.125rem;font-weight:700;">{subject_name}</span>
+            <span style="font-size:0.75rem;color:#8b93a7;">{matched_on}</span>
+          </div>
+          {stat(tables, "Tables")}
+          {stat(catalogs, "Catalogs")}
+          {stat(records_found, "Records Found")}
+          <div style="flex:1;"></div>
+          <div style="display:flex;align-items:center;gap:8px;background:rgba(127,140,160,0.12);
+                      border:1px solid rgba(127,140,160,0.22);border-radius:999px;padding:10px 18px;
+                      font-size:0.875rem;white-space:nowrap;">
+            Selected for erasure
+            <strong style="color:#ff4d5e;font-size:1rem;font-variant-numeric:tabular-nums;">{selected} / {total}</strong>
+          </div>
+        </div>''',
+        unsafe_allow_html=True,
+    )
+
+
 @st.fragment(run_every=1)
 def _render_watchdog_controls() -> None:
     """Sidebar countdown to the idle auto-stop, plus a manual stop button."""
@@ -593,11 +635,20 @@ if search_clicked:
 
     with st.spinner(f"Loading tagged column catalogue from {catalog}…"):
         result = _run_search_pipeline(token, selected, catalog, fuzzy_threshold)
+    friendly_selected = {
+        next(k for k, v in TAG_MAP.items() if v == tag): val for tag, val in selected.items()
+    }
+    matched_on = ", ".join(friendly_selected)
+    if "Name" in friendly_selected:
+        matched_on += f" · fuzzy ≥{fuzzy_threshold}"
+
     st.session_state.sar_search_id = str(uuid.uuid4())
     st.session_state.sar_cards = result["cards"]
     st.session_state.sar_lineage_nodes = result["lineage_nodes"]
     st.session_state.sar_lineage_edges = result["lineage_edges"]
     st.session_state.sar_subject_ref = "; ".join(f"{k}={v}" for k, v in selected.items())
+    st.session_state.sar_subject_name = friendly_selected.get("Name") or next(iter(friendly_selected.values()))
+    st.session_state.sar_matched_on = matched_on
     st.session_state.sar_any_matched = bool(result["matched_tables"])
     st.session_state.pop("sar_last_result", None)
     st.session_state.pop("sar_pending_targets", None)
@@ -686,55 +737,57 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
 # ---------------------------------------------------------------------------
 
 st.divider()
-st.subheader("Erasure Review")
 
 total_selected = sum(int(edited["Erase"].sum()) for _, edited in edited_cards)
 total_rows = sum(len(edited) for _, edited in edited_cards)
-tables_with_selection = sum(1 for _, edited in edited_cards if edited["Erase"].sum() > 0)
+tables_count = len(cards)
+catalogs_count = len({c["catalog"] for c in cards})
 
-col1, col2 = st.columns([3, 1])
-with col1:
-    st.metric(
-        "Selected for erasure",
-        f"{total_selected} / {total_rows}",
-        help=f"Across {tables_with_selection} table(s)",
-    )
-with col2:
-    if st.button(
-        "Review & confirm erasure",
-        type="primary",
-        use_container_width=True,
-        disabled=total_selected == 0,
-    ):
-        targets = [
-            TableErasureTarget(
-                full_name=card["full_name"],
-                provenance=card["provenance"],
-                matched_column_or_tag=card["matched_column_or_tag"],
-                selected_rows=card["original_df"].loc[edited.index[edited["Erase"]]],
-            )
-            for card, edited in edited_cards
-            if edited["Erase"].sum() > 0
-        ]
+_render_case_bar(
+    st.session_state.sar_subject_name,
+    st.session_state.sar_matched_on,
+    tables_count,
+    catalogs_count,
+    total_rows,
+    total_selected,
+    total_rows,
+)
 
-        sp_token = get_service_principal_token()
-        preview_client = DatabricksClient(sp_token)
-        previews = []
-        try:
-            executor = ErasureExecutor(preview_client)
-            for target in targets:
-                try:
-                    method, _sql, clauses = executor.build_delete_sql(target)
-                    sql_pretty = format_delete_sql_pretty(target.full_name, clauses)
-                except Exception as exc:  # noqa: BLE001
-                    method, sql_pretty = "unknown", f"-- failed to build preview: {exc}"
-                previews.append((target, method, sql_pretty))
-        finally:
-            preview_client.close()
+if st.button(
+    "Review & confirm erasure",
+    type="primary",
+    use_container_width=True,
+    disabled=total_selected == 0,
+):
+    targets = [
+        TableErasureTarget(
+            full_name=card["full_name"],
+            provenance=card["provenance"],
+            matched_column_or_tag=card["matched_column_or_tag"],
+            selected_rows=card["original_df"].loc[edited.index[edited["Erase"]]],
+        )
+        for card, edited in edited_cards
+        if edited["Erase"].sum() > 0
+    ]
 
-        st.session_state.sar_pending_targets = targets
-        st.session_state.sar_pending_previews = previews
-        _render_confirm_dialog()
+    sp_token = get_service_principal_token()
+    preview_client = DatabricksClient(sp_token)
+    previews = []
+    try:
+        executor = ErasureExecutor(preview_client)
+        for target in targets:
+            try:
+                method, _sql, clauses = executor.build_delete_sql(target)
+                sql_pretty = format_delete_sql_pretty(target.full_name, clauses)
+            except Exception as exc:  # noqa: BLE001
+                method, sql_pretty = "unknown", f"-- failed to build preview: {exc}"
+            previews.append((target, method, sql_pretty))
+    finally:
+        preview_client.close()
+
+    st.session_state.sar_pending_targets = targets
+    st.session_state.sar_pending_previews = previews
+    _render_confirm_dialog()
 
 # ---------------------------------------------------------------------------
 # Last erasure result
