@@ -179,28 +179,6 @@ def _prep_card(
     }
 
 
-def _dialog(title: str, **kwargs):
-    """``st.dialog`` decorator factory, falling back to plain ``st.dialog(title)``
-    if a kwarg (e.g. ``width``, added in a newer Streamlit than this app's
-    deployed environment resolves to) isn't supported — confirmed via a
-    st.container(key=...) TypeError that this app's actual runtime lags behind
-    the latest pip-installable Streamlit, so newer keyword-only additions
-    can't be assumed available without a graceful fallback."""
-    try:
-        return st.dialog(title, **kwargs)
-    except TypeError:
-        return st.dialog(title)
-
-
-def _st_code(body: str, **kwargs) -> None:
-    """``st.code`` with a graceful fallback if a newer kwarg (e.g. ``wrap_lines``)
-    isn't supported on this app's deployed Streamlit version — see ``_dialog``."""
-    try:
-        st.code(body, **kwargs)
-    except TypeError:
-        st.code(body, language=kwargs.get("language"))
-
-
 def _node_caption(client: DatabricksClient, full_name: str, row_count: int) -> str:
     """Row count plus the table's actual VACUUM retention, for the lineage map."""
     vacuum_raw, _ = get_vacuum_retention(client, full_name)
@@ -483,7 +461,7 @@ def _run_search_pipeline(
 # Confirm dialog
 # ---------------------------------------------------------------------------
 
-@_dialog("Confirm erasure request", width="large")
+@st.dialog("Confirm erasure request", width="large")
 def _render_confirm_dialog() -> None:
     targets: list[TableErasureTarget] = st.session_state.get("sar_pending_targets", [])
     previews: list[tuple[TableErasureTarget, str, str]] = st.session_state.get("sar_pending_previews", [])
@@ -495,7 +473,7 @@ def _render_confirm_dialog() -> None:
     for target, method, sql_pretty in previews:
         with st.expander(f"View SQL to be executed — `{target.full_name}`", expanded=False):
             st.caption(f"Row targeting method: {method.replace('_', ' ')}")
-            _st_code(sql_pretty, language="sql", wrap_lines=True)
+            st.code(sql_pretty, language="sql", wrap_lines=True)
 
     legal_basis = st.selectbox("Legal basis (GDPR Art. 17(1))", LEGAL_BASES)
     confirm_text = st.text_input("Type DELETE to confirm", placeholder="DELETE")
