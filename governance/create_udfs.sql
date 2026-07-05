@@ -85,3 +85,18 @@ END;
 CREATE OR REPLACE FUNCTION admin.shared.mask_sensitive(val VARIANT)
 RETURNS VARIANT
 RETURN '[REDACTED]'::VARIANT;
+
+-- Pseudonymise a subject identifier for the SAR erasure audit trail (admin.erasure) —
+-- the audit trail must be evidence that erasure happened, never a copy of the erased
+-- data, so the plaintext identifier is never stored. Versioned prefix so a future
+-- salt/algorithm change is traceable across old vs. new hashes.
+CREATE OR REPLACE FUNCTION admin.shared.hash_subject_ref(val STRING)
+RETURNS STRING
+RETURN SHA2(CONCAT('sar-erasure-v1:', LOWER(TRIM(val))), 256);
+
+-- Same, for hashing an individual deleted row's key material (one hash per row,
+-- stored in admin.erasure.request_items.row_key_hash) — stronger evidence than a
+-- bare row count, still no plaintext.
+CREATE OR REPLACE FUNCTION admin.shared.hash_row_key(val STRING)
+RETURNS STRING
+RETURN SHA2(CONCAT('sar-erasure-row-v1:', val), 256);

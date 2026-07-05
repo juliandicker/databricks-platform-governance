@@ -13,6 +13,7 @@ import os
 import pandas as pd
 import streamlit as st
 from databricks import sql as dbsql
+from databricks.sdk import WorkspaceClient
 
 
 class DatabricksClient:
@@ -47,11 +48,39 @@ class DatabricksClient:
             cur.execute(sql)
             return cur.fetchall_arrow().to_pandas()
 
+    def execute(self, sql: str) -> int:
+        """Execute a non-SELECT statement (DELETE, INSERT, ...) and return the affected row count.
+
+        Unlike ``query()``, this never calls ``fetchall_arrow()`` — DML
+        statements have no result set to fetch.
+        """
+        if self._conn is None:
+            self._conn = dbsql.connect(
+                server_hostname=self._host,
+                http_path=f"/sql/1.0/warehouses/{self._warehouse_id}",
+                access_token=self._token,
+            )
+        with self._conn.cursor() as cur:
+            cur.execute(sql)
+            return cur.rowcount
+
     def close(self) -> None:
         """Close the underlying connection, if one was opened."""
         if self._conn is not None:
             self._conn.close()
             self._conn = None
+
+
+def get_service_principal_token() -> str:
+    """Return a bearer token for the app's own service principal identity.
+
+    Used to escalate beyond the calling user's own privileges for actions
+    the app's SP has explicit grants for that the user doesn't necessarily
+    have themselves — upstream bronze search, and erasure execution across
+    tables owned by teams other than the caller's own (see the SAR-app-SP
+    grants in ``terraform/catalogs.tf``).
+    """
+    return WorkspaceClient().config.authenticate()["Authorization"].removeprefix("Bearer ")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
