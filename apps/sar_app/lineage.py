@@ -41,6 +41,16 @@ def _relative_time(ts) -> str:
         return str(ts)
 
 
+def _is_table_full_name(name: object) -> bool:
+    """Return True if *name* looks like a ``catalog.schema.table`` name.
+
+    ``system.access.column_lineage`` can point at non-table entities
+    (dashboards, notebook variables, temp views) where the full-name column
+    is ``NULL`` or lacks the usual three dot-separated parts.
+    """
+    return name is not None and str(name).count(".") == 2
+
+
 class LineageClient:
     """Traverses ``system.access.table_lineage`` for upstream/downstream tables.
 
@@ -138,6 +148,7 @@ class LineageClient:
                 FROM   system.access.column_lineage
                 WHERE  target_table_full_name IN ({table_in})
                   AND  target_column_name     IN ({col_in})
+                  AND  source_table_full_name IS NOT NULL
                   AND  event_date             >= current_date() - {self._LOOKBACK_DAYS}
                 GROUP BY ALL
             """)
@@ -151,6 +162,9 @@ class LineageClient:
                 tgt_key = (row.target_table_full_name, row.target_column_name)
                 if tgt_key not in frontier:
                     continue  # cross-table false match from independent IN predicates
+
+                if not _is_table_full_name(row.source_table_full_name):
+                    continue
 
                 tag, clean_val = frontier[tgt_key]
                 src_key = (row.source_table_full_name, row.source_column_name)
@@ -234,6 +248,7 @@ class LineageClient:
                 FROM   system.access.column_lineage
                 WHERE  source_table_full_name IN ({table_in})
                   AND  source_column_name     IN ({col_in})
+                  AND  target_table_full_name IS NOT NULL
                   AND  event_date             >= current_date() - {self._LOOKBACK_DAYS}
                 GROUP BY ALL
             """)
@@ -247,6 +262,9 @@ class LineageClient:
                 src_key = (row.source_table_full_name, row.source_column_name)
                 if src_key not in frontier:
                     continue  # cross-table false match from independent IN predicates
+
+                if not _is_table_full_name(row.target_table_full_name):
+                    continue
 
                 tag, clean_val = frontier[src_key]
                 tgt_key = (row.target_table_full_name, row.target_column_name)
