@@ -25,6 +25,7 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from database import DatabricksClient, get_service_principal_token, get_tagged_columns
 from erasure import ErasureExecutor, TableErasureTarget
@@ -33,6 +34,9 @@ from idle_watchdog import seconds_remaining as _watchdog_seconds_remaining
 from idle_watchdog import stop_app_now as _stop_app_now
 from idle_watchdog import touch as _touch_watchdog
 from lineage import LineageClient
+from lineage_view import STATUS_STYLE as _STATUS_STYLE
+from lineage_view import LineageEdge, LineageNode
+from lineage_view import render as render_lineage_view
 from matching import NameMatcher
 from normalise import SearchNormaliser
 from search import SARSearcher
@@ -197,7 +201,8 @@ def _run_search_pipeline(
     db_client = DatabricksClient(token)
     cards: list[dict] = []
     matched_tables: list[dict] = []
-    lineage_dot: str | None = None
+    lineage_nodes: dict[str, LineageNode] = {}
+    lineage_edges: dict[tuple[str, str], LineageEdge] = {}
 
     try:
         name_matcher = NameMatcher()
@@ -207,7 +212,7 @@ def _run_search_pipeline(
         # 1. Discover tagged columns
         tagged_df = get_tagged_columns(token, catalog)
         if tagged_df.empty:
-            return {"cards": cards, "lineage_dot": lineage_dot, "matched_tables": matched_tables}
+            return {"cards": cards, "lineage_nodes": [], "lineage_edges": [], "matched_tables": matched_tables}
 
         # 2. Search each table (direct tag matches)
         table_list = list(tagged_df.groupby(["table_schema", "table_name"]))
@@ -244,10 +249,11 @@ def _run_search_pipeline(
                     for tag in selected if tag in available_tags
                 )
                 cards.append(_prep_card(full_name, catalog, schema, table, "direct", tag_labels, result_df))
+                lineage_nodes[full_name] = LineageNode(full_name, catalog, "direct", row_count=len(result_df))
 
         progress.empty()
         if not matched_tables:
-            return {"cards": cards, "lineage_dot": lineage_dot, "matched_tables": matched_tables}
+            return {"cards": cards, "lineage_nodes": [], "lineage_edges": [], "matched_tables": matched_tables}
 
         matched_full_names = [e["full_name"] for e in matched_tables]
 
@@ -264,6 +270,26 @@ def _run_search_pipeline(
                 st.warning(f"Downstream lineage query failed: {exc}")
                 downstream_df = pd.DataFrame()
 
+        traversed_color = _STATUS_STYLE["traversed"]["color"]
+        for _, row in upstream_df.iterrows():
+            lineage_nodes.setdefault(
+                row.upstream_table,
+                LineageNode(row.upstream_table, row.upstream_table.split(".")[0], "traversed",
+                            caption="traversed · no PII match"),
+            )
+            lineage_edges[(row.upstream_table, row.matched_table)] = LineageEdge(
+                row.upstream_table, row.matched_table, color=traversed_color
+            )
+        for _, row in downstream_df.iterrows():
+            lineage_nodes.setdefault(
+                row.downstream_table,
+                LineageNode(row.downstream_table, row.downstream_table.split(".")[0], "traversed",
+                            caption="traversed · no PII match"),
+            )
+            lineage_edges[(row.matched_table, row.downstream_table)] = LineageEdge(
+                row.matched_table, row.downstream_table, color=traversed_color
+            )
+
         initial_conditions: dict[str, list[tuple[str, str, str]]] = {}
         for entry in matched_tables:
             for cols, clean_val, tag in entry["conditions"]:
@@ -271,7 +297,6 @@ def _run_search_pipeline(
                     initial_conditions.setdefault(entry["full_name"], []).append((col, tag, clean_val))
 
         # 4. Upstream bronze search via column lineage (as the app's own SP)
-        bronze_tables_found: set[str] = set()
         sp_client: DatabricksClient | None = None
         try:
             try:
@@ -304,16 +329,20 @@ def _run_search_pipeline(
                             continue
                         if not b_df.empty:
                             full_name = f"{b_cat}.{b_sch}.{b_tbl}"
-                            bronze_tables_found.add(full_name)
                             tag_labels = ", ".join(tag for _, _, tag in b_conditions)
                             cards.append(_prep_card(full_name, b_cat, b_sch, b_tbl, "upstream", tag_labels, b_df))
+                            lineage_nodes[full_name] = LineageNode(full_name, b_cat, "upstream", row_count=len(b_df))
+                            cols_used = ", ".join(sorted({c for cols, _, _ in b_conditions for c in cols}))
+                            for matched in matched_full_names:
+                                lineage_edges[(full_name, matched)] = LineageEdge(
+                                    full_name, matched, color=_STATUS_STYLE["upstream"]["color"], label=cols_used
+                                )
                     b_progress.empty()
         finally:
             if sp_client is not None:
                 sp_client.close()
 
         # 5. Downstream copies search via column lineage (as the user)
-        downstream_tables_found: set[str] = set()
         with st.spinner("Tracing column lineage downstream…"):
             try:
                 downstream_lineage_df = lineage.column_lineage_downstream(initial_conditions)
@@ -334,16 +363,22 @@ def _run_search_pipeline(
                     continue
                 if not d_df.empty:
                     full_name = f"{d_cat}.{d_sch}.{d_tbl}"
-                    downstream_tables_found.add(full_name)
                     tag_labels = ", ".join(tag for _, _, tag in d_conditions)
                     cards.append(_prep_card(full_name, d_cat, d_sch, d_tbl, "downstream", tag_labels, d_df))
+                    lineage_nodes[full_name] = LineageNode(full_name, d_cat, "downstream", row_count=len(d_df))
+                    cols_used = ", ".join(sorted({c for cols, _, _ in d_conditions for c in cols}))
+                    for matched in matched_full_names:
+                        lineage_edges[(matched, full_name)] = LineageEdge(
+                            matched, full_name, color=_STATUS_STYLE["downstream"]["color"], label=cols_used
+                        )
             d_progress.empty()
 
-        lineage_dot = lineage.build_graphviz(
-            matched_full_names, upstream_df, downstream_df, bronze_tables_found, downstream_tables_found
-        )
-
-        return {"cards": cards, "lineage_dot": lineage_dot, "matched_tables": matched_tables}
+        return {
+            "cards": cards,
+            "lineage_nodes": list(lineage_nodes.values()),
+            "lineage_edges": list(lineage_edges.values()),
+            "matched_tables": matched_tables,
+        }
     finally:
         db_client.close()
 
@@ -514,7 +549,8 @@ if search_clicked:
         result = _run_search_pipeline(token, selected, catalog, fuzzy_threshold)
     st.session_state.sar_search_id = str(uuid.uuid4())
     st.session_state.sar_cards = result["cards"]
-    st.session_state.sar_lineage_dot = result["lineage_dot"]
+    st.session_state.sar_lineage_nodes = result["lineage_nodes"]
+    st.session_state.sar_lineage_edges = result["lineage_edges"]
     st.session_state.sar_subject_ref = "; ".join(f"{k}={v}" for k, v in selected.items())
     st.session_state.sar_any_matched = bool(result["matched_tables"])
     st.session_state.pop("sar_last_result", None)
@@ -556,8 +592,11 @@ st.caption(
     "`system.access.column_lineage` (1-year rolling window). Solid nodes matched "
     "the subject; dashed nodes were traversed but held no PII match."
 )
-if st.session_state.sar_lineage_dot:
-    st.graphviz_chart(st.session_state.sar_lineage_dot, use_container_width=True)
+if st.session_state.sar_lineage_nodes:
+    lineage_html, lineage_height = render_lineage_view(
+        st.session_state.sar_lineage_nodes, st.session_state.sar_lineage_edges
+    )
+    components.html(lineage_html, height=lineage_height, scrolling=False)
 else:
     st.info("No lineage found for the matched tables.")
 st.caption(SYSTEM_TABLE_REMINDER)

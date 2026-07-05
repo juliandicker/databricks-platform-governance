@@ -287,55 +287,6 @@ class LineageClient:
             return pd.DataFrame()
         return pd.DataFrame(downstream_rows)
 
-    def build_graphviz(
-        self,
-        matched_full_names: list[str],
-        upstream_df: pd.DataFrame,
-        downstream_df: pd.DataFrame,
-        bronze_tables: set[str],
-        downstream_copy_tables: set[str],
-    ) -> str:
-        """Build a Graphviz DOT graph of the lineage traversal for display.
-
-        Tables reached only by the generic ``table_lineage`` BFS (no actual
-        PII match) are dashed/grey. Tables with an actual match are solid,
-        colored by how they were found: direct tag match (blue), upstream
-        bronze source via column lineage (violet), downstream copy via
-        column lineage (teal).
-        """
-        nodes: dict[str, str] = {}
-        edges: list[tuple[str, str]] = []
-
-        for name in matched_full_names:
-            nodes[name] = 'style=filled,fillcolor="#5b8def",fontcolor=white'
-
-        if not upstream_df.empty:
-            for _, row in upstream_df.iterrows():
-                nodes.setdefault(row.upstream_table, 'style=dashed,color="#888888"')
-                edges.append((row.upstream_table, row.matched_table))
-
-        if not downstream_df.empty:
-            for _, row in downstream_df.iterrows():
-                nodes.setdefault(row.downstream_table, 'style=dashed,color="#888888"')
-                edges.append((row.matched_table, row.downstream_table))
-
-        for name in bronze_tables:
-            nodes[name] = 'style=filled,fillcolor="#9b6bff",fontcolor=white'
-
-        for name in downstream_copy_tables:
-            nodes[name] = 'style=filled,fillcolor="#2dd4bf",fontcolor=black'
-
-        def esc(name: str) -> str:
-            return name.replace('"', '\\"')
-
-        lines = ["digraph lineage {", "rankdir=LR;", 'node [shape=box,fontname="Helvetica"];']
-        for name, style in nodes.items():
-            lines.append(f'"{esc(name)}" [{style}];')
-        for src, tgt in edges:
-            lines.append(f'"{esc(src)}" -> "{esc(tgt)}";')
-        lines.append("}")
-        return "\n".join(lines)
-
     def build_display_table(
         self,
         upstream_df: pd.DataFrame,
