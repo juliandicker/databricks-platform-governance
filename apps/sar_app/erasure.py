@@ -472,24 +472,6 @@ class ErasureExecutor:
             error_message = (
                 f"Dry-run count ({matched_count}) did not match rows selected ({rows_selected})."
             )
-            # TEMPORARY diagnostic — remove once the production-only gold
-            # mismatch is root-caused. Shows what identity/values the
-            # executing session (the SP, in production) actually sees for
-            # a tagged (maskable) column, vs. what the predicate expects.
-            try:
-                who = self._client.query("SELECT current_user() AS u").iloc[0]["u"]
-                probe_col = target.selected_rows.columns[1]  # e.g. full_name — tagged/maskable
-                expected_val = target.selected_rows.iloc[0][probe_col]
-                sample_df = self._client.query(
-                    f"SELECT `{probe_col}` AS actual_val FROM {target.full_name} LIMIT 5"
-                )
-                error_message += (
-                    f" [diag] current_user={who!r}; probe_col={probe_col!r}; "
-                    f"expected_val={expected_val!r}; "
-                    f"actual_sample={sample_df['actual_val'].tolist()!r}"
-                )
-            except Exception as diag_exc:  # noqa: BLE001
-                error_message += f" [diag failed: {diag_exc}]"
         return DryRunCheck(
             full_name=target.full_name, row_targeting_method=method, delete_sql=delete_sql,
             rows_selected=rows_selected, matched_count=matched_count, vacuum_retention_raw=vacuum_raw,

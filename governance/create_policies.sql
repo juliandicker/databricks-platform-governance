@@ -12,6 +12,19 @@
 --
 -- has_tag() requires a fully qualified tag name — namespace wildcards (has_tag('class'))
 -- are not supported and cause a compile error.
+--
+-- RENAMING a policy here does NOT clean up the old name — CREATE OR REPLACE POLICY
+-- only replaces a policy already existing under that exact name, so an old-named
+-- object from a prior rename just keeps silently existing in Unity Catalog,
+-- governed by whatever exempt list it had at the time. This bit us for real: a
+-- 2026-06-29 rename of mask_name_columns into mask_sensitive_columns left the old
+-- mask_name_columns policy active on gold with a stale exempt list that never
+-- included the SAR app SP, so the SP's queries saw [REDACTED] for full_name and
+-- every erasure dry-run against gold failed with a 0-row mismatch — reproduced,
+-- diagnosed, and the orphaned policy manually dropped in production on 2026-07-06.
+-- DROP POLICY doesn't support IF EXISTS, so it can't be made part of this
+-- idempotent job — any future rename needs a one-time manual
+-- `DROP POLICY <old_name> ON CATALOG <catalog>` alongside the file edit.
 
 -- ── silver ────────────────────────────────────────────────────────────────────
 
