@@ -100,3 +100,18 @@ RETURN SHA2(CONCAT('sar-erasure-v1:', LOWER(TRIM(val))), 256);
 CREATE OR REPLACE FUNCTION admin.shared.hash_row_key(val STRING)
 RETURNS STRING
 RETURN SHA2(CONCAT('sar-erasure-row-v1:', val), 256);
+
+-- Same pattern as hash_subject_ref, for the SAR Article 15 access-report audit
+-- trail (admin.access) — deliberately its own function with its own versioned
+-- salt rather than reusing hash_subject_ref, so a hash in admin.access.requests
+-- can't be mistaken for one produced by the erasure feature.
+CREATE OR REPLACE FUNCTION admin.shared.hash_access_subject_ref(val STRING)
+RETURNS STRING
+RETURN SHA2(CONCAT('sar-access-v1:', LOWER(TRIM(val))), 256);
+
+-- Same pattern as hash_row_key, for hashing a disclosed row's key material
+-- (one hash per row, stored in admin.access.request_items.row_key_hash) —
+-- evidence of exactly which rows were disclosed, never the row content itself.
+CREATE OR REPLACE FUNCTION admin.shared.hash_access_row_key(val STRING)
+RETURNS STRING
+RETURN SHA2(CONCAT('sar-access-row-v1:', val), 256);

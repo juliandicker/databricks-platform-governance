@@ -2,7 +2,7 @@
 
 ![SAR search app — identifiers, data lineage map, and per-table review cards](sar-app-search-and-results.jpeg)
 
-The `platform-sar-app` Databricks App (`apps/sar_app/`) is a two-page tool for handling GDPR Subject Access Requests end to end: find every copy of a subject's data across the lakehouse, review and confirm its erasure, and — if needed — undo an erasure while the underlying table's VACUUM retention window still holds the deleted files. It's a Streamlit app with a sidebar page switcher (`streamlit-option-menu`): **Search & Erase** and **Review Erasure Requests**.
+The `platform-sar-app` Databricks App (`apps/sar_app/`) is a three-page tool for handling GDPR Subject Access Requests end to end: find every copy of a subject's data across the lakehouse, generate an Article 15 access report or review and confirm Article 17 erasure, and — if needed — undo an erasure while the underlying table's VACUUM retention window still holds the deleted files. It's a Streamlit app with a sidebar page switcher (`streamlit-option-menu`): **Search & Erase**, **Review Erasure Requests**, and **Review Access Requests**.
 
 ## Search & Erase
 
@@ -12,7 +12,9 @@ Enter one or more values and click **Search**. Queries run under the calling use
 
 After a silver/gold search finds matches, the app automatically traces upstream column lineage to bronze via `system.access.column_lineage` (BFS, up to 10 hops), then searches those bronze tables for the same subject. Bronze queries run as the app's own service principal rather than the calling user — users don't have `SELECT` on bronze by design, and bronze columns don't carry governed tags. It also traces *downstream* copies via the same column lineage mechanism, catching derived tables that don't carry the original `class.*` tags. Column lineage carries the original tag and search value through intermediate hops, so the correct search conditions arrive at each table regardless of how many transformation steps sit between them.
 
-Results render as a custom lineage map (bronze → silver → gold, solid nodes for matches, dashed for traversed-but-no-match) plus one review card per matched table, colour-coded to match the lineage map (blue = direct match, violet = upstream source, teal = downstream copy). Clicking a matched lineage node scrolls the page to its corresponding card. Every found row is pre-selected for erasure in an editable table — deselect anything that looks like a false positive before confirming. Clicking **Review & confirm erasure** opens a dialog showing the exact `DELETE` SQL for each table (on-screen only, never persisted), a GDPR Art. 17(1) legal basis selector, and a typed `DELETE` confirmation.
+Results render as a custom lineage map (bronze → silver → gold, solid nodes for matches, dashed for traversed-but-no-match) plus one review card per matched table, colour-coded to match the lineage map (blue = direct match, violet = upstream source, teal = downstream copy). Clicking a matched lineage node scrolls the page to its corresponding card. Every found row is pre-selected for erasure in an editable table — deselect anything that looks like a false positive before confirming.
+
+Two actions sit below the results, side by side: **Review & confirm erasure** (Art. 17) opens a dialog showing the exact `DELETE` SQL for each table (on-screen only, never persisted), a GDPR Art. 17(1) legal basis selector, and a typed `DELETE` confirmation. **Generate Art. 15 access report** covers every row found above regardless of the erasure checkboxes — a subject's right of access isn't conditioned on what's marked for erasure — and is documented separately below.
 
 ![Confirm erasure request dialog — per-table SQL preview, legal basis, typed DELETE confirmation](sar-app-confirm-erasure.png)
 
@@ -44,6 +46,41 @@ Restore is a **surgical row reinsert, not `RESTORE TABLE`**: `RESTORE TABLE ... 
 
 Restoring requires typing `RESTORE`, selecting a reason, and (like erasure execution) runs as the app's own service principal. Each attempt is logged to `admin.erasure.restorations`, including which Delta version was actually read from, and an already-successfully-restored item shows "Already restored" instead of a button (preventing duplicate reinsertion).
 
+## Access Reports (Art.15)
+
+The app's original name — "GDPR Subject Access Request search and erasure" — was always slightly wrong: a genuine Subject Access Request is Article 15 (right of access, a *report* of the subject's data), while everything above is Article 17 (right to erasure). **Generate Art. 15 access report**, next to the erasure button on the Search & Erase page, closes that gap using the exact same search/lineage results already on screen — no separate search step, no new lakehouse read grants, since it only ever renders rows already fetched by the search pipeline.
+
+### Column redaction review
+
+A row matching the subject's search identifiers can still carry a *different* subject's personal data in another column — a shared booking row is the canonical example. The app cannot reliably tell "the subject's own other PII field" apart from "a different subject's PII in the same row," so it never auto-redacts. Instead, clicking the button pulls every `class.*`-tagged column present on each matched table (not just the ones the search matched against) and presents a per-column checklist, pre-checked for columns tagged with an identifier the search actually looked for (or untagged, non-governed columns) and pre-*unchecked* for any other governed column, with its tag shown so the reviewer can judge it before including it. Table and column `COMMENT` metadata (Unity Catalog `information_schema.tables`/`columns`) is shown alongside as drafting context — useful when set, but never a substitute for the reviewer's own judgment, since pipeline authors may not have set comments or may have stale ones.
+
+### Report format — printable HTML, not JSON or a PDF library
+
+The generated document is a single self-contained HTML file (inline CSS, a `@media print` stylesheet) rather than raw JSON or a PDF-generation dependency. A subject-facing disclosure needs to actually be readable, and the reviewer can open the downloaded file in a real browser tab and use Print → Save as PDF for a handoff-ready copy — no PDF library for this app to maintain. It covers Art. 15(1)'s required disclosures: confirmation of processing, purpose (the reviewer's required free-text entry — there's no purpose/recipient registry in this platform to auto-derive it from), categories of personal data (from the matched `class.*` tags), recipients (a static, truthful line reflecting what this platform actually models — internal platform and owning team only, no external processors configured; verify against real-world data flows outside this repo before relying on it), retention (per table, from `admin.shared.retention_compliance`'s `has_delete_at`/`freshness_sla` — deliberately not the erasure feature's VACUUM retention, which is a different concept: how long a *deleted* row's files survive, not a live row's retention policy), automated decision-making (none identified on this platform), and the subject's other rights (rectification, erasure, restriction, objection, portability, complaint to a supervisory authority). Redacted columns are dropped from the report entirely, not masked — Art. 15(4) is about not disclosing another person's data, not about showing a placeholder.
+
+This build deliberately keeps the document fully template-based and deterministic — no LLM in the generation path. An LLM turning schema-level facts (table/column comments, tags, retention flags) into cover-sheet prose would be low-risk since it never sees the subject's actual data, but feeding the *disclosed rows themselves* to an LLM would create a new processing purpose and a new recipient (the model provider) needing its own disclosure under Art. 15(1)(c), and risks hallucinating facts into a document meant to be an accurate legal record — not attempted here.
+
+Same reasoning as the "Download as CSV" CSS block above: that block stops *incidental* PII export during ordinary browsing, not a deliberate, reviewed, typed-confirmation-gated disclosure, which is the one legitimate export path this feature exists to provide.
+
+### Audit trail — `admin.access`
+
+Every generated report writes to `admin.access` (same ownership/grant pattern as `admin.erasure` — see `terraform/catalogs.tf: databricks_grants.admin_access`):
+
+| Table | Purpose |
+|---|---|
+| `requests` | One row per access-report case: hashed subject reference, requester, overall status |
+| `request_items` | One row per (request, source table): rows disclosed, columns included/redacted, hashed row keys |
+
+Same "evidence, never a copy" principle as erasure: `admin.shared.hash_access_subject_ref`/`hash_access_row_key` (their own versioned salts, distinct from erasure's, so a hash here can't be mistaken for one erasure produced) hash the subject reference and row keys before persisting, and the generated report document itself is never stored server-side — it only ever exists as the reviewer's one-time download. There's no restorations-equivalent table; a disclosure has nothing to undo.
+
+### Review Access Requests
+
+The third sidebar page lists past access requests and their per-table items — read-only, no restore action, since there's nothing to undo. It adds one Art. 12(3) compliance aid the erasure review page doesn't need: a one-month response-deadline badge per request (on-time / overdue), computed from `requested_at`/`completed_at`, since this is exactly where a DPO would check SLA compliance.
+
+### Explicitly out of scope for this pass
+
+Article 12(5)'s "manifestly unfounded or excessive" refusal ground, an automated purpose/recipient inventory, and LLM-drafted narrative are all deliberately not built — none of them block a correct, minimal Art. 15 disclosure path, and building them ahead of a real requirement risks over-engineering a feature that, like erasure before it, is meant to grow incrementally.
+
 ## Idle auto-stop
 
 Databricks Apps bill per hour while running and have no built-in scale-to-zero, so a rarely-used app left running racks up cost unattended. The app stops its own compute after `IDLE_TIMEOUT_MINUTES` (env var in `apps/sar_app/app.yaml`, default 30) since the last completed search, via a background watchdog using the app's own service principal (granted `CAN_MANAGE` on itself in `resources/apps/sar.yml`). A live countdown and a "Stop app now" button are shown in the sidebar for stopping it immediately instead of waiting out the timeout. Because the app can now be stopped between uses, the CI deploy workflow explicitly runs `databricks apps start platform-sar-app` before redeploying source code.
@@ -54,7 +91,7 @@ Restricted to `sg-dbplat-data-stewards` and `sg-dbplat-data-platform-admins`.
 
 ## Terraform grants for bronze/silver/gold access
 
-The app SP needs `USE_CATALOG`/`USE_SCHEMA`/`SELECT`/`MODIFY` on bronze, silver, and gold alike (`MODIFY` is needed everywhere it can find PII, including bronze via upstream lineage tracing, to actually execute the confirmed delete — an earlier bronze-is-SELECT-only grant meant a real erasure request found and confirmed a bronze row, then failed with `PERMISSION_DENIED` on the delete itself, since the two-phase dry-run check only exercises `SELECT` and can't catch a missing `MODIFY` grant ahead of time), `EXECUTE` on `admin.shared` (to call the hash UDFs), and `SELECT`/`MODIFY` on `admin.erasure`, plus `CAN_USE` on the platform SQL warehouse. These are granted via `var.sar_app_sp_id` in `terraform/terraform.tfvars`. The SP application ID is auto-generated by Databricks Apps on first deploy — retrieve it with:
+The app SP needs `USE_CATALOG`/`USE_SCHEMA`/`SELECT`/`MODIFY` on bronze, silver, and gold alike (`MODIFY` is needed everywhere it can find PII, including bronze via upstream lineage tracing, to actually execute the confirmed delete — an earlier bronze-is-SELECT-only grant meant a real erasure request found and confirmed a bronze row, then failed with `PERMISSION_DENIED` on the delete itself, since the two-phase dry-run check only exercises `SELECT` and can't catch a missing `MODIFY` grant ahead of time), `EXECUTE` on `admin.shared` (to call the hash UDFs), and `SELECT`/`MODIFY` on `admin.erasure` and `admin.access`, plus `CAN_USE` on the platform SQL warehouse. These are granted via `var.sar_app_sp_id` in `terraform/terraform.tfvars`. The SP application ID is auto-generated by Databricks Apps on first deploy — retrieve it with:
 
 ```sh
 databricks apps get platform-sar-app -o json | jq -r '.service_principal_id'

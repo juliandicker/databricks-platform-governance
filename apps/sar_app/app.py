@@ -21,14 +21,23 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from streamlit_option_menu import option_menu
 
+import access_review
 import erasure_review
+from access_report import (
+    TableAccessTarget,
+    build_report,
+    get_all_tagged_columns,
+    get_retention_info,
+    get_table_comments,
+    write_access_request,
+)
 from database import DatabricksClient, get_service_principal_token, get_tagged_columns
 from erasure import ErasureExecutor, TableErasureTarget, format_delete_sql_pretty, get_vacuum_retention
 from idle_watchdog import ensure_started as _ensure_watchdog_started
@@ -520,6 +529,113 @@ def _render_confirm_dialog() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Access report dialog (GDPR Art. 15)
+# ---------------------------------------------------------------------------
+
+@st.dialog("Generate Art. 15 access report", width="large")
+def _render_access_report_dialog() -> None:
+    review_tables: list[dict] = st.session_state.get("sar_access_review_tables", [])
+    retention_df: pd.DataFrame = st.session_state.get("sar_access_retention_df", pd.DataFrame())
+    comments: dict = st.session_state.get("sar_access_comments", {})
+
+    st.write(
+        f"This will generate a subject-facing HTML report covering "
+        f"**{len(review_tables)}** table(s). Review which columns to include "
+        f"before generating — a column outside the searched identifier(s) may "
+        f"belong to a different person (e.g. a shared record)."
+    )
+    st.caption(SYSTEM_TABLE_REMINDER)
+
+    search_id = st.session_state.get("sar_search_id", "")
+    targets: list[TableAccessTarget] = []
+    for rt in review_tables:
+        full_name = rt["full_name"]
+        with st.expander(f"`{full_name}` — {len(rt['rows'])} row(s)", expanded=True):
+            comment_info = comments.get(full_name, {})
+            if comment_info.get("table_comment"):
+                st.caption(f"Table description: {comment_info['table_comment']}")
+
+            checklist_df = pd.DataFrame({
+                "Column": rt["all_columns"],
+                "Tag": [rt["tag_by_col"].get(c, "—") for c in rt["all_columns"]],
+                "Include": [rt["default_include"][c] for c in rt["all_columns"]],
+            })
+            edited = st.data_editor(
+                checklist_df,
+                key=f"access_cols_{search_id}_{full_name}",
+                hide_index=True,
+                use_container_width=True,
+                disabled=["Column", "Tag"],
+                column_config={
+                    "Include": st.column_config.CheckboxColumn(
+                        "Include",
+                        help="Unchecked columns are governed personal-data columns outside "
+                        "this request's searched identifier(s) — verify before including.",
+                    )
+                },
+            )
+            included = list(edited.loc[edited["Include"], "Column"])
+            redacted = [c for c in rt["tag_by_col"] if c not in included]
+
+            targets.append(TableAccessTarget(
+                full_name=full_name,
+                provenance=rt["provenance"],
+                matched_column_or_tag=rt["matched_column_or_tag"],
+                rows=rt["rows"],
+                included_columns=included,
+                redacted_columns=redacted,
+            ))
+
+    purpose = st.text_area(
+        "Purpose of processing (required — included in the report, not stored in the audit trail)",
+        placeholder="e.g. Providing and administering travel booking services for the data subject.",
+    )
+    confirm_text = st.text_input("Type REPORT to confirm", placeholder="REPORT")
+    can_confirm = confirm_text.strip().upper() == "REPORT" and bool(purpose.strip())
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Cancel", use_container_width=True, key="access_cancel"):
+            for key in ("sar_access_review_tables", "sar_access_retention_df", "sar_access_comments"):
+                st.session_state.pop(key, None)
+            st.rerun()
+    with col2:
+        if st.button(
+            "Generate report",
+            type="primary",
+            use_container_width=True,
+            disabled=not can_confirm,
+        ):
+            _touch_watchdog()
+            sp_token = get_service_principal_token()
+            exec_client = DatabricksClient(sp_token)
+            try:
+                with st.spinner("Generating report…"):
+                    request_id = write_access_request(
+                        exec_client,
+                        subject_ref=st.session_state.get("sar_subject_ref", ""),
+                        requested_by=_get_requester_identity(),
+                        targets=targets,
+                    )
+                    html_report = build_report(
+                        request_id=request_id,
+                        subject_display=st.session_state.get("sar_subject_name", ""),
+                        requested_by=_get_requester_identity(),
+                        purpose=purpose.strip(),
+                        generated_at=datetime.now(timezone.utc),
+                        targets=targets,
+                        retention_df=retention_df,
+                        comments=comments,
+                    )
+            finally:
+                exec_client.close()
+            st.session_state.sar_access_last_result = (request_id, html_report)
+            for key in ("sar_access_review_tables", "sar_access_retention_df", "sar_access_comments"):
+                st.session_state.pop(key, None)
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
 
@@ -560,15 +676,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# A sidebar option_menu rather than st.navigation/st.Page — this keeps the
-# second page a minimal, isolated addition (call the new module, st.stop())
+# A sidebar option_menu rather than st.navigation/st.Page — this keeps each
+# extra page a minimal, isolated addition (call the new module, st.stop())
 # instead of restructuring the existing single-script search flow below
 # into multiple page-callables.
 with st.sidebar:
     page = option_menu(
         None,
-        ["Search & Erase", "Review Erasure Requests"],
-        icons=["search", "clock-history"],
+        ["Search & Erase", "Review Erasure Requests", "Review Access Requests"],
+        icons=["search", "clock-history", "file-earmark-text"],
         default_index=0,
         key="sar_page",
     )
@@ -580,6 +696,17 @@ if page == "Review Erasure Requests":
     review_client = DatabricksClient(token)
     try:
         erasure_review.render(review_client)
+    finally:
+        review_client.close()
+    st.stop()
+if page == "Review Access Requests":
+    token = _get_token()
+    if not token:
+        st.error("No auth token available. Ensure the app is running inside Databricks.")
+        st.stop()
+    review_client = DatabricksClient(token)
+    try:
+        access_review.render(review_client)
     finally:
         review_client.close()
     st.stop()
@@ -715,9 +842,17 @@ if search_clicked:
     st.session_state.sar_subject_name = friendly_selected.get("Name") or next(iter(friendly_selected.values()))
     st.session_state.sar_matched_on = matched_on
     st.session_state.sar_any_matched = bool(result["matched_tables"])
+    # Which class.* tags this search actually looked for — used by the access-
+    # report dialog to default-include columns tagged with a searched
+    # identifier and default-exclude other governed columns for review.
+    st.session_state.sar_selected_tags = list(selected.keys())
     st.session_state.pop("sar_last_result", None)
     st.session_state.pop("sar_pending_targets", None)
     st.session_state.pop("sar_pending_previews", None)
+    st.session_state.pop("sar_access_last_result", None)
+    st.session_state.pop("sar_access_review_tables", None)
+    st.session_state.pop("sar_access_retention_df", None)
+    st.session_state.pop("sar_access_comments", None)
 
 if "sar_cards" not in st.session_state:
     st.stop()
@@ -858,12 +993,23 @@ _render_case_bar(
     total_rows,
 )
 
-if st.button(
-    "Review & confirm erasure",
-    type="primary",
-    use_container_width=True,
-    disabled=total_selected == 0,
-):
+action_col1, action_col2 = st.columns(2)
+with action_col1:
+    erase_clicked = st.button(
+        "Review & confirm erasure",
+        type="primary",
+        use_container_width=True,
+        disabled=total_selected == 0,
+    )
+with action_col2:
+    report_clicked = st.button(
+        "Generate Art. 15 access report",
+        use_container_width=True,
+        help="Covers every row found above, regardless of erasure selection — "
+        "a subject's right of access isn't conditioned on what's marked for erasure.",
+    )
+
+if erase_clicked:
     targets = [
         TableErasureTarget(
             full_name=card["full_name"],
@@ -894,6 +1040,42 @@ if st.button(
     st.session_state.sar_pending_previews = previews
     _render_confirm_dialog()
 
+if report_clicked:
+    sp_token = get_service_principal_token()
+    meta_client = DatabricksClient(sp_token)
+    full_names = [card["full_name"] for card in cards]
+    searched_tags = set(st.session_state.get("sar_selected_tags", []))
+    try:
+        with st.spinner("Loading column tags, retention, and table descriptions…"):
+            retention_df = get_retention_info(meta_client, full_names)
+            comments = get_table_comments(meta_client, full_names)
+
+            review_tables = []
+            for card in cards:
+                tagged = get_all_tagged_columns(meta_client, card["full_name"])
+                tag_by_col = {col: tag for tag, cols in tagged.items() for col in cols}
+                all_columns = list(card["original_df"].columns)
+                default_include = {
+                    col: (tag_by_col.get(col) in searched_tags) or (col not in tag_by_col)
+                    for col in all_columns
+                }
+                review_tables.append({
+                    "full_name": card["full_name"],
+                    "provenance": card["provenance"],
+                    "matched_column_or_tag": card["matched_column_or_tag"],
+                    "rows": card["original_df"],
+                    "all_columns": all_columns,
+                    "tag_by_col": tag_by_col,
+                    "default_include": default_include,
+                })
+    finally:
+        meta_client.close()
+
+    st.session_state.sar_access_review_tables = review_tables
+    st.session_state.sar_access_retention_df = retention_df
+    st.session_state.sar_access_comments = comments
+    _render_access_report_dialog()
+
 # ---------------------------------------------------------------------------
 # Last erasure result
 # ---------------------------------------------------------------------------
@@ -912,3 +1094,23 @@ if "sar_last_result" in st.session_state:
         )
         if r.error_message:
             st.caption(f"⚠ {r.error_message}")
+
+# ---------------------------------------------------------------------------
+# Last access report result
+# ---------------------------------------------------------------------------
+
+if "sar_access_last_result" in st.session_state:
+    request_id, html_report = st.session_state.sar_access_last_result
+    st.divider()
+    st.subheader("Access Report Result")
+    st.success(f"Access report `{request_id}` generated — recorded in `admin.access`.")
+    st.caption(
+        "Open the downloaded file in a browser tab and use Print → Save as PDF "
+        "for a handoff-ready document."
+    )
+    st.download_button(
+        "Download report (.html)",
+        data=html_report,
+        file_name=f"access-report-{request_id}.html",
+        mime="text/html",
+    )

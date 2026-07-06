@@ -33,6 +33,15 @@ resources:
             file:
               path: ${workspace.file_path}/governance/create_erasure_tables.sql
 
+        - task_key: create_access_tables
+          description: "Create the SAR Article 15 access-report audit trail tables in admin.access"
+          depends_on:
+            - task_key: create_udfs
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ${workspace.file_path}/governance/create_access_tables.sql
+
     governance_daily:
       name: platform-governance-daily
       description: >
