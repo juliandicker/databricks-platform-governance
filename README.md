@@ -23,10 +23,9 @@ Unity Catalog governance for the [`simple-databricks-deployment`](https://github
 | [`docs/sar-app.md`](docs/sar-app.md) | The SAR app end to end: search, GDPR erasure and access reports, lineage cache, local dev |
 | [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) | Catalog grants, ABAC column masking, governed tags, Entra groups/AIM, Access Audit dashboard |
 | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md) | Platform metadata columns, freshness SLAs, Auto TTL/retention, governance jobs, Data Governance dashboard |
-| [`docs/data-product-teams.md`](docs/data-product-teams.md) | Data mesh team model, SQL warehouses, serverless cost governance/budgets, landing zone |
 | [`docs/governed-tag-grants.md`](docs/governed-tag-grants.md) | Manual governed-tag `ASSIGN` grant procedure |
 
-All docs live here, including topics that describe infra-repo resources (catalog grants, Entra groups/AIM, data mesh teams) — kept alongside the governance content they're intertwined with rather than split across both repos. A few cross-references to specific `terraform/*.tf` resources point at the infra repo, called out explicitly where they occur.
+`docs/data-product-teams.md` moved back to the infra repo — data mesh teams (SPs, schemas, warehouses, budgets) are entirely Terraform's concern, not something this repo creates or deploys. The docs above stay here despite touching some infra-repo resources (catalog grants, Entra groups/AIM) because they're intertwined with governance content that does belong here. A few cross-references to specific `terraform/*.tf` resources point at the infra repo, called out explicitly where they occur.
 
 ## How this repo is enabled
 

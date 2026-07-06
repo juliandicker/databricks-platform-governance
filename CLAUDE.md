@@ -35,9 +35,8 @@ Nothing in the infra repo ever triggers a deploy here (its GitHub App is scoped 
 | `docs/governed-tag-grants.md` | Manual procedure for governed-tag `ASSIGN` grants (not API-manageable — see below) |
 | `docs/access-and-pii-governance.md` | Catalog grants, ABAC column masking, governed tags, Entra groups/AIM, Access Audit dashboard |
 | `docs/data-lifecycle-governance.md` | Platform metadata columns, freshness SLAs, Auto TTL/retention, governance jobs, Data Governance dashboard |
-| `docs/data-product-teams.md` | Data mesh team model, SQL warehouses, serverless cost governance/budgets, landing zone |
 
-All docs live here now (moved from the infra repo in one pass), including the three above that describe infra-repo resources — kept alongside the governance content they're intertwined with rather than split. Some cross-references inside them point at specific `terraform/*.tf` resources in the infra repo, called out explicitly where they occur.
+`docs/data-product-teams.md` lives in the infra repo, not here — data mesh teams are entirely Terraform's concern, not something this repo creates or deploys. The two docs above stay here despite touching infra-repo resources (catalog grants, Entra groups/AIM) because they're intertwined with governance content that does belong here. Some cross-references inside them point at specific `terraform/*.tf` resources in the infra repo, called out explicitly where they occur.
 
 ## Key constraints inherited from the infra repo's naming contract
 
