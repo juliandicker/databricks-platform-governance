@@ -1,0 +1,689 @@
+{
+  "datasets": [
+    {
+      "name": "audit_kpis",
+      "displayName": "Audit KPIs",
+      "queryLines": [
+        "SELECT\n",
+        "  COUNT(CASE\n",
+        "    WHEN event_date >= current_date() - 7\n",
+        "     AND service_name = 'unityCatalog'\n",
+        "     AND action_name = 'generateTemporaryTableCredential'\n",
+        "     AND (request_params['full_name_arg'] LIKE 'silver.%'\n",
+        "       OR request_params['full_name_arg'] LIKE 'gold.%')\n",
+        "  THEN 1 END) AS pii_access_7d,\n",
+        "  COUNT(DISTINCT CASE\n",
+        "    WHEN event_date >= current_date() - 7\n",
+        "     AND service_name = 'unityCatalog'\n",
+        "     AND action_name = 'generateTemporaryTableCredential'\n",
+        "     AND (request_params['full_name_arg'] LIKE 'silver.%'\n",
+        "       OR request_params['full_name_arg'] LIKE 'gold.%')\n",
+        "  THEN user_identity.email END) AS unique_users_7d,\n",
+        "  COUNT(CASE\n",
+        "    WHEN event_date >= current_date() - 7\n",
+        "     AND response.status_code IS NOT NULL\n",
+        "     AND response.status_code != '200'\n",
+        "     AND action_name IN ('login', 'tokenLogin', 'oidcTokenExchange', 'serviceAccountLogin')\n",
+        "  THEN 1 END) AS failed_auth_7d,\n",
+        "  COUNT(CASE\n",
+        "    WHEN action_name IN ('updatePermissions', 'updateSharePermissions',\n",
+        "                         'grantPermission', 'revokePermission')\n",
+        "  THEN 1 END) AS permission_changes_30d\n",
+        "FROM system.access.audit\n",
+        "WHERE event_date >= current_date() - 30"
+      ]
+    },
+    {
+      "name": "pii_access",
+      "displayName": "PII Table Access",
+      "queryLines": [
+        "SELECT\n",
+        "  event_time,\n",
+        "  user_identity.email                       AS user_email,\n",
+        "  request_params['full_name_arg']            AS table_name,\n",
+        "  source_ip_address,\n",
+        "  response.status_code\n",
+        "FROM system.access.audit\n",
+        "WHERE event_date >= current_date() - 7\n",
+        "  AND service_name = 'unityCatalog'\n",
+        "  AND action_name = 'generateTemporaryTableCredential'\n",
+        "  AND (\n",
+        "    request_params['full_name_arg'] LIKE 'silver.%'\n",
+        "    OR request_params['full_name_arg'] LIKE 'gold.%'\n",
+        "  )\n",
+        "ORDER BY event_time DESC\n",
+        "LIMIT 1000"
+      ]
+    },
+    {
+      "name": "pii_access_by_user",
+      "displayName": "PII Access by User",
+      "queryLines": [
+        "SELECT\n",
+        "  user_identity.email AS user_email,\n",
+        "  COUNT(*)            AS access_count\n",
+        "FROM system.access.audit\n",
+        "WHERE event_date >= current_date() - 7\n",
+        "  AND service_name = 'unityCatalog'\n",
+        "  AND action_name = 'generateTemporaryTableCredential'\n",
+        "  AND (\n",
+        "    request_params['full_name_arg'] LIKE 'silver.%'\n",
+        "    OR request_params['full_name_arg'] LIKE 'gold.%'\n",
+        "  )\n",
+        "GROUP BY user_identity.email\n",
+        "ORDER BY access_count DESC\n",
+        "LIMIT 20"
+      ]
+    },
+    {
+      "name": "pii_access_by_day",
+      "displayName": "PII Access by Day",
+      "queryLines": [
+        "SELECT\n",
+        "  event_date,\n",
+        "  COUNT(*) AS access_count\n",
+        "FROM system.access.audit\n",
+        "WHERE event_date >= current_date() - 7\n",
+        "  AND service_name = 'unityCatalog'\n",
+        "  AND action_name = 'generateTemporaryTableCredential'\n",
+        "  AND (\n",
+        "    request_params['full_name_arg'] LIKE 'silver.%'\n",
+        "    OR request_params['full_name_arg'] LIKE 'gold.%'\n",
+        "  )\n",
+        "GROUP BY event_date\n",
+        "ORDER BY event_date ASC"
+      ]
+    },
+    {
+      "name": "failed_auth",
+      "displayName": "Failed Auth Events",
+      "queryLines": [
+        "SELECT\n",
+        "  event_time,\n",
+        "  user_identity.email  AS user_email,\n",
+        "  action_name,\n",
+        "  source_ip_address,\n",
+        "  response.status_code,\n",
+        "  response.error_message\n",
+        "FROM system.access.audit\n",
+        "WHERE event_date >= current_date() - 7\n",
+        "  AND response.status_code IS NOT NULL\n",
+        "  AND response.status_code != '200'\n",
+        "  AND action_name IN ('login', 'tokenLogin', 'oidcTokenExchange', 'serviceAccountLogin')\n",
+        "ORDER BY event_time DESC\n",
+        "LIMIT 500"
+      ]
+    },
+    {
+      "name": "permission_changes",
+      "displayName": "Permission Changes",
+      "queryLines": [
+        "SELECT\n",
+        "  event_time,\n",
+        "  user_identity.email                     AS user_email,\n",
+        "  action_name,\n",
+        "  request_params['securable_type']        AS object_type,\n",
+        "  request_params['full_name_arg']         AS object_name,\n",
+        "  response.status_code\n",
+        "FROM system.access.audit\n",
+        "WHERE event_date >= current_date() - 30\n",
+        "  AND action_name IN (\n",
+        "    'updatePermissions', 'updateSharePermissions',\n",
+        "    'grantPermission', 'revokePermission'\n",
+        "  )\n",
+        "ORDER BY event_time DESC\n",
+        "LIMIT 500"
+      ]
+    }
+  ],
+  "pages": [
+    {
+      "name": "c3d4e5f6",
+      "displayName": "Access Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "kpi_pii_access",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "audit_kpis",
+                  "fields": [
+                    {
+                      "name": "pii_access_7d",
+                      "expression": "`pii_access_7d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "PII Table Access (7d)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "pii_access_7d"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_unique_users",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "audit_kpis",
+                  "fields": [
+                    {
+                      "name": "unique_users_7d",
+                      "expression": "`unique_users_7d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Unique Users Accessing PII (7d)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "unique_users_7d"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_failed_auth",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "audit_kpis",
+                  "fields": [
+                    {
+                      "name": "failed_auth_7d",
+                      "expression": "`failed_auth_7d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Failed Auth Events (7d)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "failed_auth_7d",
+                  "style": {
+                    "color": "#FF5252"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "kpi_permission_changes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "audit_kpis",
+                  "fields": [
+                    {
+                      "name": "permission_changes_30d",
+                      "expression": "`permission_changes_30d`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Permission Changes (30d)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "permission_changes_30d",
+                  "style": {
+                    "color": "#FFC107"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_pii_by_user",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "pii_access_by_user",
+                  "fields": [
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "access_count",
+                      "expression": "`access_count`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "PII Access by User (7d)",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "user_email",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "access_count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_pii_by_day",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "pii_access_by_day",
+                  "fields": [
+                    {
+                      "name": "event_date",
+                      "expression": "`event_date`"
+                    },
+                    {
+                      "name": "access_count",
+                      "expression": "`access_count`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "PII Access Trend (7d)",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "event_date",
+                  "scale": {
+                    "type": "temporal"
+                  }
+                },
+                "y": {
+                  "fieldName": "access_count",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "table_permission_changes",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "permission_changes",
+                  "fields": [
+                    {
+                      "name": "event_time",
+                      "expression": "`event_time`"
+                    },
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "action_name",
+                      "expression": "`action_name`"
+                    },
+                    {
+                      "name": "object_type",
+                      "expression": "`object_type`"
+                    },
+                    {
+                      "name": "object_name",
+                      "expression": "`object_name`"
+                    },
+                    {
+                      "name": "status_code",
+                      "expression": "`status_code`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Recent Permission Changes (30d)",
+                "showTitle": true
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  { "fieldName": "event_time" },
+                  { "fieldName": "user_email" },
+                  { "fieldName": "action_name" },
+                  { "fieldName": "object_type" },
+                  { "fieldName": "object_name" },
+                  { "fieldName": "status_code" }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 12,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "d4e5f6a7",
+      "displayName": "Audit Detail",
+      "layout": [
+        {
+          "widget": {
+            "name": "table_pii_access",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "pii_access",
+                  "fields": [
+                    {
+                      "name": "event_time",
+                      "expression": "`event_time`"
+                    },
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "source_ip_address",
+                      "expression": "`source_ip_address`"
+                    },
+                    {
+                      "name": "status_code",
+                      "expression": "`status_code`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "PII Table Access Log (7d)",
+                "showTitle": true
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  { "fieldName": "event_time" },
+                  { "fieldName": "user_email" },
+                  { "fieldName": "table_name" },
+                  { "fieldName": "source_ip_address" },
+                  { "fieldName": "status_code" }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 7
+          }
+        },
+        {
+          "widget": {
+            "name": "table_failed_auth",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "failed_auth",
+                  "fields": [
+                    {
+                      "name": "event_time",
+                      "expression": "`event_time`"
+                    },
+                    {
+                      "name": "user_email",
+                      "expression": "`user_email`"
+                    },
+                    {
+                      "name": "action_name",
+                      "expression": "`action_name`"
+                    },
+                    {
+                      "name": "source_ip_address",
+                      "expression": "`source_ip_address`"
+                    },
+                    {
+                      "name": "status_code",
+                      "expression": "`status_code`"
+                    },
+                    {
+                      "name": "error_message",
+                      "expression": "`error_message`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Failed Auth Events (7d)",
+                "showTitle": true
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  { "fieldName": "event_time" },
+                  { "fieldName": "user_email" },
+                  { "fieldName": "action_name" },
+                  { "fieldName": "source_ip_address" },
+                  { "fieldName": "status_code" },
+                  { "fieldName": "error_message" }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 12,
+            "height": 5
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#1B1B1F",
+        "dark": "#1B1B1F"
+      },
+      "widgetBackgroundColor": {
+        "light": "#2A2A30",
+        "dark": "#2A2A30"
+      },
+      "widgetBorderColor": {
+        "light": "#3A3A42",
+        "dark": "#3A3A42"
+      },
+      "fontColor": {
+        "light": "#E8E8EC",
+        "dark": "#E8E8EC"
+      },
+      "selectionColor": {
+        "light": "#6C9CFF",
+        "dark": "#6C9CFF"
+      },
+      "visualizationColors": [
+        "#4CAF50",
+        "#FF5252",
+        "#FFC107",
+        "#42A5F5",
+        "#AB47BC",
+        "#26A69A"
+      ],
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED",
+      "fontFamily": "Inter",
+      "widgetPadding": 8,
+      "widgetMargin": 4,
+      "widgetCornerRadius": 8,
+      "widgetShadow": 0,
+      "fontSettings": {
+        "base": {
+          "fontSize": 11
+        }
+      },
+      "gridLineColor": {
+        "light": "#3A3A42",
+        "dark": "#3A3A42"
+      },
+      "axisLineColor": {
+        "light": "#4A4A52",
+        "dark": "#4A4A52"
+      }
+    },
+    "applyModeEnabled": false
+  }
+}

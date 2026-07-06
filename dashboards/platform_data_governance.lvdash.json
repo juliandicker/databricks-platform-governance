@@ -1,0 +1,757 @@
+{
+  "datasets": [
+    {
+      "name": "stale_tables",
+      "displayName": "Stale Tables",
+      "queryLines": [
+        "SELECT\n",
+        "  full_table_name,\n",
+        "  max_updated_at,\n",
+        "  freshness_sla,\n",
+        "  freshness_sla_minutes,\n",
+        "  sla_status\n",
+        "FROM\n",
+        "  admin.shared.retention_compliance\n",
+        "WHERE\n",
+        "  sla_status IN ('STALE', 'NEVER_UPDATED', 'ERROR', 'NO_COLUMN')\n",
+        "ORDER BY\n",
+        "  CASE\n",
+        "    WHEN sla_status = 'NEVER_UPDATED' THEN 0\n",
+        "    WHEN sla_status = 'NO_COLUMN' THEN 1\n",
+        "    WHEN sla_status = 'ERROR' THEN 2\n",
+        "    ELSE 3\n",
+        "  END,\n",
+        "  max_updated_at ASC NULLS FIRST"
+      ]
+    },
+    {
+      "name": "non_compliant_tables",
+      "displayName": "Non-Compliant Tables",
+      "queryLines": [
+        "SELECT\n",
+        "  table_catalog,\n",
+        "  table_schema,\n",
+        "  table_name,\n",
+        "  insertion_status,\n",
+        "  freshness_status,\n",
+        "  retention_status,\n",
+        "  sla_status,\n",
+        "  freshness_sla_minutes,\n",
+        "  freshness_sla,\n",
+        "  max_updated_at\n",
+        "FROM\n",
+        "  admin.shared.retention_compliance\n",
+        "WHERE\n",
+        "  insertion_status = 'NON-COMPLIANT'\n",
+        "  OR freshness_status = 'NON-COMPLIANT'\n",
+        "  OR retention_status = 'NON-COMPLIANT'\n",
+        "  OR sla_status IN ('STALE', 'NEVER_UPDATED', 'ERROR', 'NO_COLUMN')\n",
+        "ORDER BY\n",
+        "  table_catalog,\n",
+        "  table_schema"
+      ]
+    },
+    {
+      "name": "compliance_metrics",
+      "displayName": "Compliance Metrics",
+      "config": {
+        "version": "1.1",
+        "source": "admin.shared.retention_compliance",
+        "dimensions": [
+          {
+            "name": "table_catalog",
+            "expr": "table_catalog"
+          },
+          {
+            "name": "table_schema",
+            "expr": "table_schema"
+          }
+        ],
+        "measures": [
+          {
+            "name": "total_tables",
+            "expr": "COUNT(*)"
+          },
+          {
+            "name": "fully_compliant_tables",
+            "expr": "COUNT(CASE WHEN insertion_status = 'COMPLIANT' AND freshness_status = 'COMPLIANT' AND retention_status = 'COMPLIANT' THEN 1 END)"
+          },
+          {
+            "name": "non_compliant_tables",
+            "expr": "COUNT(CASE WHEN insertion_status = 'NON-COMPLIANT' OR freshness_status = 'NON-COMPLIANT' OR retention_status = 'NON-COMPLIANT' THEN 1 END)"
+          },
+          {
+            "name": "compliance_pct",
+            "expr": "ROUND(MEASURE(fully_compliant_tables) * 100.0 / MEASURE(total_tables), 1)"
+          },
+          {
+            "name": "stale_tables",
+            "expr": "COUNT(CASE WHEN sla_status IN ('STALE', 'NEVER_UPDATED', 'ERROR', 'NO_COLUMN') THEN 1 END)"
+          },
+          {
+            "name": "never_updated",
+            "expr": "COUNT(CASE WHEN sla_status = 'NEVER_UPDATED' THEN 1 END)"
+          },
+          {
+            "name": "stale_pct",
+            "expr": "ROUND(MEASURE(stale_tables) * 100.0 / MEASURE(total_tables), 1)"
+          }
+        ]
+      }
+    }
+  ],
+  "pages": [
+    {
+      "name": "97ddfea9",
+      "displayName": "Compliance Overview",
+      "layout": [
+        {
+          "widget": {
+            "name": "counter_total",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "measure(total_tables)",
+                      "expression": "MEASURE(`total_tables`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Total Tables Monitored",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(total_tables)"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "counter_compliant",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "measure(fully_compliant_tables)",
+                      "expression": "MEASURE(`fully_compliant_tables`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Fully Compliant",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(fully_compliant_tables)"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 3,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "counter_noncompliant",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "measure(non_compliant_tables)",
+                      "expression": "MEASURE(`non_compliant_tables`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Non-Compliant",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(non_compliant_tables)",
+                  "style": {
+                    "color": "#FF5252"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "counter_pct",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "measure(compliance_pct)",
+                      "expression": "MEASURE(`compliance_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Overall Compliance %",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(compliance_pct)",
+                  "formatTemplate": "{{ @formatted }}%"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 9,
+            "y": 0,
+            "width": 3,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_catalog",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "table_catalog",
+                      "expression": "`table_catalog`"
+                    },
+                    {
+                      "name": "measure(compliance_pct)",
+                      "expression": "MEASURE(`compliance_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Compliance Rate by Catalog",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "table_catalog",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(compliance_pct)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "bar_schema",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "table_schema",
+                      "expression": "`table_schema`"
+                    },
+                    {
+                      "name": "measure(non_compliant_tables)",
+                      "expression": "MEASURE(`non_compliant_tables`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 3,
+              "frame": {
+                "title": "Non-Compliant Tables by Schema",
+                "showTitle": true
+              },
+              "widgetType": "bar",
+              "encodings": {
+                "x": {
+                  "fieldName": "table_schema",
+                  "scale": {
+                    "type": "categorical"
+                  }
+                },
+                "y": {
+                  "fieldName": "measure(non_compliant_tables)",
+                  "scale": {
+                    "type": "quantitative"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 6,
+            "y": 2,
+            "width": 6,
+            "height": 5
+          }
+        },
+        {
+          "widget": {
+            "name": "table_noncompliant",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "non_compliant_tables",
+                  "fields": [
+                    {
+                      "name": "table_catalog",
+                      "expression": "`table_catalog`"
+                    },
+                    {
+                      "name": "table_schema",
+                      "expression": "`table_schema`"
+                    },
+                    {
+                      "name": "table_name",
+                      "expression": "`table_name`"
+                    },
+                    {
+                      "name": "insertion_status",
+                      "expression": "`insertion_status`"
+                    },
+                    {
+                      "name": "freshness_status",
+                      "expression": "`freshness_status`"
+                    },
+                    {
+                      "name": "retention_status",
+                      "expression": "`retention_status`"
+                    },
+                    {
+                      "name": "sla_status",
+                      "expression": "`sla_status`"
+                    },
+                    {
+                      "name": "freshness_sla",
+                      "expression": "`freshness_sla`"
+                    },
+                    {
+                      "name": "max_updated_at",
+                      "expression": "`max_updated_at`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Non-Compliant Tables Detail",
+                "showTitle": true
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "table_catalog"
+                  },
+                  {
+                    "fieldName": "table_schema"
+                  },
+                  {
+                    "fieldName": "table_name"
+                  },
+                  {
+                    "fieldName": "insertion_status"
+                  },
+                  {
+                    "fieldName": "freshness_status"
+                  },
+                  {
+                    "fieldName": "retention_status"
+                  },
+                  {
+                    "fieldName": "sla_status"
+                  },
+                  {
+                    "fieldName": "freshness_sla"
+                  },
+                  {
+                    "fieldName": "max_updated_at"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 7,
+            "width": 12,
+            "height": 6
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    },
+    {
+      "name": "b615ef58",
+      "displayName": "Stale Tables",
+      "layout": [
+        {
+          "widget": {
+            "name": "c91f0d23",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "measure(stale_pct)",
+                      "expression": "MEASURE(`stale_pct`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "% Stale",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(stale_pct)",
+                  "formatTemplate": "{{ @formatted }}%"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 8,
+            "y": 0,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "339878fe",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "measure(never_updated)",
+                      "expression": "MEASURE(`never_updated`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Never Updated (NULL)",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(never_updated)",
+                  "style": {
+                    "color": "#FFC107"
+                  }
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 4,
+            "y": 0,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "4fdc610f",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "compliance_metrics",
+                  "fields": [
+                    {
+                      "name": "measure(stale_tables)",
+                      "expression": "MEASURE(`stale_tables`)"
+                    }
+                  ],
+                  "disaggregated": false
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Stale Tables",
+                "showTitle": true
+              },
+              "widgetType": "counter",
+              "encodings": {
+                "value": {
+                  "fieldName": "measure(stale_tables)"
+                }
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 0,
+            "width": 4,
+            "height": 2
+          }
+        },
+        {
+          "widget": {
+            "name": "19553031",
+            "queries": [
+              {
+                "name": "main_query",
+                "query": {
+                  "datasetName": "stale_tables",
+                  "fields": [
+                    {
+                      "name": "full_table_name",
+                      "expression": "`full_table_name`"
+                    },
+                    {
+                      "name": "sla_status",
+                      "expression": "`sla_status`"
+                    },
+                    {
+                      "name": "freshness_sla_minutes",
+                      "expression": "`freshness_sla_minutes`"
+                    },
+                    {
+                      "name": "freshness_sla",
+                      "expression": "`freshness_sla`"
+                    },
+                    {
+                      "name": "max_updated_at",
+                      "expression": "`max_updated_at`"
+                    }
+                  ],
+                  "disaggregated": true
+                }
+              }
+            ],
+            "spec": {
+              "version": 2,
+              "frame": {
+                "title": "Stale Tables (SLA Breached)",
+                "showTitle": true
+              },
+              "widgetType": "table",
+              "encodings": {
+                "columns": [
+                  {
+                    "fieldName": "full_table_name"
+                  },
+                  {
+                    "fieldName": "sla_status"
+                  },
+                  {
+                    "fieldName": "freshness_sla_minutes"
+                  },
+                  {
+                    "fieldName": "freshness_sla"
+                  },
+                  {
+                    "fieldName": "max_updated_at"
+                  }
+                ]
+              },
+              "data": {
+                "queryName": "main_query"
+              }
+            }
+          },
+          "position": {
+            "x": 0,
+            "y": 2,
+            "width": 12,
+            "height": 9
+          }
+        }
+      ],
+      "pageType": "PAGE_TYPE_CANVAS",
+      "layoutVersion": "GRID_V1"
+    }
+  ],
+  "uiSettings": {
+    "theme": {
+      "canvasBackgroundColor": {
+        "light": "#1B1B1F",
+        "dark": "#1B1B1F"
+      },
+      "widgetBackgroundColor": {
+        "light": "#2A2A30",
+        "dark": "#2A2A30"
+      },
+      "widgetBorderColor": {
+        "light": "#3A3A42",
+        "dark": "#3A3A42"
+      },
+      "fontColor": {
+        "light": "#E8E8EC",
+        "dark": "#E8E8EC"
+      },
+      "selectionColor": {
+        "light": "#6C9CFF",
+        "dark": "#6C9CFF"
+      },
+      "visualizationColors": [
+        "#4CAF50",
+        "#FF5252",
+        "#FFC107",
+        "#42A5F5",
+        "#AB47BC",
+        "#26A69A"
+      ],
+      "widgetHeaderAlignment": "ALIGNMENT_UNSPECIFIED",
+      "fontFamily": "Inter",
+      "widgetPadding": 8,
+      "widgetMargin": 4,
+      "widgetCornerRadius": 8,
+      "widgetShadow": 0,
+      "fontSettings": {
+        "base": {
+          "fontSize": 11
+        }
+      },
+      "gridLineColor": {
+        "light": "#3A3A42",
+        "dark": "#3A3A42"
+      },
+      "axisLineColor": {
+        "light": "#4A4A52",
+        "dark": "#4A4A52"
+      }
+    },
+    "applyModeEnabled": false
+  }
+}
