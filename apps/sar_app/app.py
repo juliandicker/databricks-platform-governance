@@ -20,7 +20,9 @@ instead of re-querying Databricks.
 from __future__ import annotations
 
 import os
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 
 import pandas as pd
@@ -44,7 +46,7 @@ from idle_watchdog import ensure_started as _ensure_watchdog_started
 from idle_watchdog import seconds_remaining as _watchdog_seconds_remaining
 from idle_watchdog import stop_app_now as _stop_app_now
 from idle_watchdog import touch as _touch_watchdog
-from lineage import LineageClient
+from lineage import LineageClient, refresh_lineage_cache
 from lineage_view import STATUS_STYLE as _STATUS_STYLE
 from lineage_view import LineageEdge, LineageNode
 from lineage_view import card_container_key
@@ -235,6 +237,45 @@ def _render_case_bar(
     )
 
 
+def _render_timing_breakdown(timings: list[dict], wall_seconds: float) -> None:
+    """Collapsed-by-default breakdown of where a search spent its time.
+
+    Populated by ``_mark`` calls throughout ``_run_search_pipeline`` — phase
+    totals (tag catalogue scan, table lineage, column lineage traces) plus
+    one entry per individual table query, so a single slow table doesn't
+    just get averaged away into an opaque phase total. ``wall_seconds`` is
+    the pipeline's actual elapsed time; the phase totals below can sum to
+    more than that, since the table/column lineage traces now run
+    concurrently rather than one after another.
+    """
+    if not timings:
+        return
+
+    df = pd.DataFrame(timings)
+    query_seconds = df["seconds"].sum()
+
+    with st.expander(f"⏱️ Search performance breakdown — {wall_seconds:.1f}s wall time", expanded=False):
+        if query_seconds > wall_seconds * 1.1:
+            st.caption(
+                f"Phases below sum to {query_seconds:.1f}s of query time — more than the "
+                f"{wall_seconds:.1f}s wall time because the lineage queries run concurrently."
+            )
+        summary = (
+            df.groupby("phase", as_index=False)
+            .agg(total_seconds=("seconds", "sum"), queries=("seconds", "count"))
+            .sort_values("total_seconds", ascending=False)
+        )
+        summary["total_seconds"] = summary["total_seconds"].round(2)
+        st.dataframe(summary, hide_index=True, use_container_width=True)
+
+        per_table = df[df["table"].notna()].sort_values("seconds", ascending=False).head(15)
+        if not per_table.empty:
+            st.caption("Slowest individual table queries:")
+            per_table = per_table[["phase", "table", "seconds"]].copy()
+            per_table["seconds"] = per_table["seconds"].round(2)
+            st.dataframe(per_table, hide_index=True, use_container_width=True)
+
+
 @st.fragment(run_every=1)
 def _render_watchdog_controls() -> None:
     """Sidebar countdown to the idle auto-stop, plus a manual stop button."""
@@ -246,9 +287,41 @@ def _render_watchdog_controls() -> None:
         st.success("Stopping the app…")
 
 
+def _render_lineage_cache_refresh() -> None:
+    """Sidebar 'refresh now' escape hatch for admin.lineage_cache.
+
+    The cache normally refreshes on governance_daily's schedule (see
+    governance/refresh_lineage_cache.sql); this is for a steward who knows a
+    relevant pipeline ran very recently and doesn't want to wait for the next
+    scheduled refresh before an urgent search.
+    """
+    if st.button("🔄 Refresh lineage cache now", use_container_width=True):
+        try:
+            sp_token = get_service_principal_token()
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not acquire service-principal token: {exc}")
+            return
+        sp_client = DatabricksClient(sp_token)
+        try:
+            with st.spinner("Refreshing lineage cache…"):
+                refresh_lineage_cache(sp_client)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Lineage cache refresh failed: {exc}")
+        else:
+            st.success("Lineage cache refreshed.")
+        finally:
+            sp_client.close()
+
+
 # ---------------------------------------------------------------------------
 # Search pipeline — runs once per Search click, cached in session_state
 # ---------------------------------------------------------------------------
+
+def _mark(timings: list[dict], phase: str, start: float, table: str | None = None) -> None:
+    """Record one timing entry (phase total, or a single table's query) for the
+    performance breakdown expander — see ``_render_timing_breakdown``."""
+    timings.append({"phase": phase, "table": table, "seconds": time.perf_counter() - start})
+
 
 def _run_search_pipeline(
     token: str,
@@ -257,21 +330,28 @@ def _run_search_pipeline(
     fuzzy_threshold: int,
 ) -> dict:
     """Search, trace lineage, and build review cards. Only called on Search click."""
+    pipeline_start = time.perf_counter()
     db_client = DatabricksClient(token)
     cards: list[dict] = []
     matched_tables: list[dict] = []
     lineage_nodes: dict[str, LineageNode] = {}
     lineage_edges: dict[tuple[str, str], LineageEdge] = {}
+    timings: list[dict] = []
 
     try:
         name_matcher = NameMatcher()
         searcher = SARSearcher(db_client, name_matcher)
-        lineage = LineageClient(db_client)
 
         # 1. Discover tagged columns
+        t0 = time.perf_counter()
         tagged_df = get_tagged_columns(token, catalog)
+        _mark(timings, "Tag catalogue scan", t0)
         if tagged_df.empty:
-            return {"cards": cards, "lineage_nodes": [], "lineage_edges": [], "matched_tables": matched_tables}
+            return {
+                "cards": cards, "lineage_nodes": [], "lineage_edges": [],
+                "matched_tables": matched_tables, "timings": timings,
+                "wall_seconds": time.perf_counter() - pipeline_start,
+            }
 
         # 2. Search each table (direct tag matches)
         table_list = list(tagged_df.groupby(["table_schema", "table_name"]))
@@ -294,11 +374,15 @@ def _run_search_pipeline(
             if not conditions:
                 continue
 
+            full_name_probe = f"{catalog}.{schema}.{table}"
+            t_table = time.perf_counter()
             try:
                 result_df = searcher.search(catalog, schema, table, conditions, fuzzy_threshold)
             except Exception as exc:  # noqa: BLE001
                 st.warning(f"`{catalog}.{schema}.{table}` — query failed: {exc}")
+                _mark(timings, "Direct search", t_table, full_name_probe)
                 continue
+            _mark(timings, "Direct search", t_table, full_name_probe)
 
             if not result_df.empty:
                 full_name = f"{catalog}.{schema}.{table}"
@@ -318,22 +402,87 @@ def _run_search_pipeline(
 
         progress.empty()
         if not matched_tables:
-            return {"cards": cards, "lineage_nodes": [], "lineage_edges": [], "matched_tables": matched_tables}
+            return {
+                "cards": cards, "lineage_nodes": [], "lineage_edges": [],
+                "matched_tables": matched_tables, "timings": timings,
+                "wall_seconds": time.perf_counter() - pipeline_start,
+            }
 
         matched_full_names = [e["full_name"] for e in matched_tables]
 
-        # 3. Table-level lineage (for the graph)
-        with st.spinner("Traversing lineage graph…"):
-            try:
-                upstream_df = lineage.upstream(matched_full_names)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"Upstream lineage query failed: {exc}")
-                upstream_df = pd.DataFrame()
-            try:
-                downstream_df = lineage.downstream(matched_full_names)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"Downstream lineage query failed: {exc}")
-                downstream_df = pd.DataFrame()
+        initial_conditions: dict[str, list[tuple[str, str, str]]] = {}
+        for entry in matched_tables:
+            for cols, clean_val, tag in entry["conditions"]:
+                for col in cols:
+                    initial_conditions.setdefault(entry["full_name"], []).append((col, tag, clean_val))
+
+        # SP token used both for the lineage-cache reads below (data stewards
+        # only get read access to admin.lineage_cache, not account users —
+        # the admin catalog deliberately has no blanket account-users grant,
+        # see terraform/catalogs.tf) and for the upstream bronze search loop
+        # further down. Fetched once, reused for both.
+        try:
+            sp_token = get_service_principal_token()
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Could not acquire service-principal token: {exc}")
+            sp_token = None
+
+        upstream_df = downstream_df = col_lineage_df = downstream_lineage_df = pd.DataFrame()
+
+        if sp_token is None:
+            st.warning("Skipping lineage tracing — no service-principal token available.")
+        else:
+            # 3+4a+5a. Table-level lineage (for the graph) and the two column-lineage
+            # traces (for finding more copies) are independent of each other — the
+            # table-level pair only needs matched_full_names, the column-lineage
+            # pair only needs initial_conditions, both already known here. Each of
+            # these admin.lineage_cache scans can cost some time alone, so running
+            # all four concurrently turns their *sum* into roughly their *max*
+            # instead. Each needs its own connection — a single DatabricksClient's
+            # SQL connection isn't safe to share across threads.
+            def _fetch_lineage(fn):
+                start = time.perf_counter()
+                client = DatabricksClient(sp_token)
+                try:
+                    result = fn(LineageClient(client))
+                finally:
+                    client.close()
+                return result, time.perf_counter() - start
+
+            with st.spinner("Traversing lineage graph…"):
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    fut_table_up = pool.submit(_fetch_lineage, lambda lc: lc.upstream(matched_full_names))
+                    fut_table_down = pool.submit(_fetch_lineage, lambda lc: lc.downstream(matched_full_names))
+                    fut_col_up = pool.submit(_fetch_lineage, lambda lc: lc.column_lineage_upstream(initial_conditions))
+                    fut_col_down = pool.submit(_fetch_lineage, lambda lc: lc.column_lineage_downstream(initial_conditions))
+
+                    try:
+                        upstream_df, elapsed = fut_table_up.result()
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"Upstream lineage query failed: {exc}")
+                        upstream_df, elapsed = pd.DataFrame(), 0.0
+                    timings.append({"phase": "Table lineage (upstream)", "table": None, "seconds": elapsed})
+
+                    try:
+                        downstream_df, elapsed = fut_table_down.result()
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"Downstream lineage query failed: {exc}")
+                        downstream_df, elapsed = pd.DataFrame(), 0.0
+                    timings.append({"phase": "Table lineage (downstream)", "table": None, "seconds": elapsed})
+
+                    try:
+                        col_lineage_df, elapsed = fut_col_up.result()
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"Column lineage query failed: {exc}")
+                        col_lineage_df, elapsed = pd.DataFrame(), 0.0
+                    timings.append({"phase": "Column lineage trace (upstream)", "table": None, "seconds": elapsed})
+
+                    try:
+                        downstream_lineage_df, elapsed = fut_col_down.result()
+                    except Exception as exc:  # noqa: BLE001
+                        st.warning(f"Downstream column lineage query failed: {exc}")
+                        downstream_lineage_df, elapsed = pd.DataFrame(), 0.0
+                    timings.append({"phase": "Column lineage trace (downstream)", "table": None, "seconds": elapsed})
 
         traversed_color = _STATUS_STYLE["traversed"]["color"]
         for _, row in upstream_df.iterrows():
@@ -355,36 +504,19 @@ def _run_search_pipeline(
                 row.matched_table, row.downstream_table, color=traversed_color
             )
 
-        initial_conditions: dict[str, list[tuple[str, str, str]]] = {}
-        for entry in matched_tables:
-            for cols, clean_val, tag in entry["conditions"]:
-                for col in cols:
-                    initial_conditions.setdefault(entry["full_name"], []).append((col, tag, clean_val))
-
-        # 4. Upstream search via column lineage — every hop back to bronze,
+        # 4b. Upstream search via column lineage — every hop back to bronze,
         # not just the terminal bronze table (an intermediate silver/gold
         # table the searched data was built from is a real copy too).
         # Bronze rows need the app's own SP (SELECT-restricted for users);
         # any other layer can be searched as the calling user, same as a
-        # direct match.
+        # direct match. Reuses the sp_token already fetched above for the
+        # lineage-cache reads.
         sp_client: DatabricksClient | None = None
         sp_searcher: SARSearcher | None = None
         try:
-            try:
-                sp_token = get_service_principal_token()
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"Could not acquire service-principal token for bronze access: {exc}")
-                sp_token = None
             if sp_token:
                 sp_client = DatabricksClient(sp_token)
                 sp_searcher = SARSearcher(sp_client, name_matcher)
-
-            with st.spinner("Tracing column lineage upstream…"):
-                try:
-                    col_lineage_df = lineage.column_lineage_upstream(initial_conditions)
-                except Exception as exc:  # noqa: BLE001
-                    st.warning(f"Column lineage query failed: {exc}")
-                    col_lineage_df = pd.DataFrame()
 
             if not col_lineage_df.empty:
                 upstream_plan = _build_lineage_plan(col_lineage_df, "source_table_full_name", "source_column_name")
@@ -401,11 +533,15 @@ def _run_search_pipeline(
                     else:
                         active_searcher, active_client = searcher, db_client
 
+                    full_name_probe = f"{u_cat}.{u_sch}.{u_tbl}"
+                    t_table = time.perf_counter()
                     try:
                         u_df = active_searcher.search(u_cat, u_sch, u_tbl, u_conditions, fuzzy_threshold)
                     except Exception as exc:  # noqa: BLE001
                         st.warning(f"`{u_cat}.{u_sch}.{u_tbl}` — upstream query failed: {exc}")
+                        _mark(timings, "Upstream table search", t_table, full_name_probe)
                         continue
+                    _mark(timings, "Upstream table search", t_table, full_name_probe)
                     if not u_df.empty:
                         full_name = f"{u_cat}.{u_sch}.{u_tbl}"
                         tag_labels = ", ".join(tag for _, _, tag in u_conditions)
@@ -427,25 +563,22 @@ def _run_search_pipeline(
             if sp_client is not None:
                 sp_client.close()
 
-        # 5. Downstream copies search via column lineage (as the user)
-        with st.spinner("Tracing column lineage downstream…"):
-            try:
-                downstream_lineage_df = lineage.column_lineage_downstream(initial_conditions)
-            except Exception as exc:  # noqa: BLE001
-                st.warning(f"Downstream column lineage query failed: {exc}")
-                downstream_lineage_df = pd.DataFrame()
-
+        # 5b. Downstream copies search via column lineage (as the user)
         if not downstream_lineage_df.empty:
             downstream_plan = _build_lineage_plan(downstream_lineage_df, "target_table_full_name", "target_column_name")
             d_progress = st.progress(0, text="Searching downstream tables…")
             downstream_items = list(downstream_plan.items())
             for d_i, ((d_cat, d_sch, d_tbl), d_conditions) in enumerate(downstream_items):
                 d_progress.progress((d_i + 1) / len(downstream_items), text=f"Searching `{d_cat}.{d_sch}.{d_tbl}`…")
+                full_name_probe = f"{d_cat}.{d_sch}.{d_tbl}"
+                t_table = time.perf_counter()
                 try:
                     d_df = searcher.search(d_cat, d_sch, d_tbl, d_conditions, fuzzy_threshold)
                 except Exception as exc:  # noqa: BLE001
                     st.warning(f"`{d_cat}.{d_sch}.{d_tbl}` — downstream query failed: {exc}")
+                    _mark(timings, "Downstream table search", t_table, full_name_probe)
                     continue
+                _mark(timings, "Downstream table search", t_table, full_name_probe)
                 if not d_df.empty:
                     full_name = f"{d_cat}.{d_sch}.{d_tbl}"
                     tag_labels = ", ".join(tag for _, _, tag in d_conditions)
@@ -469,6 +602,8 @@ def _run_search_pipeline(
             "lineage_nodes": list(lineage_nodes.values()),
             "lineage_edges": list(lineage_edges.values()),
             "matched_tables": matched_tables,
+            "timings": timings,
+            "wall_seconds": time.perf_counter() - pipeline_start,
         }
     finally:
         db_client.close()
@@ -590,8 +725,7 @@ def _render_access_report_dialog() -> None:
         "Purpose of processing (required — included in the report, not stored in the audit trail)",
         placeholder="e.g. Providing and administering travel booking services for the data subject.",
     )
-    confirm_text = st.text_input("Type REPORT to confirm", placeholder="REPORT")
-    can_confirm = confirm_text.strip().upper() == "REPORT" and bool(purpose.strip())
+    can_confirm = bool(purpose.strip())
 
     col1, col2 = st.columns(2)
     with col1:
@@ -721,6 +855,7 @@ st.caption(
 
 with st.sidebar:
     _render_watchdog_controls()
+    _render_lineage_cache_refresh()
 
 # ---------------------------------------------------------------------------
 # Search options — laid out across the main page's width rather than the
@@ -838,6 +973,8 @@ if search_clicked:
     st.session_state.sar_cards = result["cards"]
     st.session_state.sar_lineage_nodes = result["lineage_nodes"]
     st.session_state.sar_lineage_edges = result["lineage_edges"]
+    st.session_state.sar_search_timings = result["timings"]
+    st.session_state.sar_search_wall_seconds = result["wall_seconds"]
     st.session_state.sar_subject_ref = "; ".join(f"{k}={v}" for k, v in selected.items())
     st.session_state.sar_subject_name = friendly_selected.get("Name") or next(iter(friendly_selected.values()))
     st.session_state.sar_matched_on = matched_on
@@ -861,6 +998,11 @@ _touch_watchdog()
 
 cards: list[dict] = st.session_state.sar_cards
 search_id: str = st.session_state.sar_search_id
+
+_render_timing_breakdown(
+    st.session_state.get("sar_search_timings", []),
+    st.session_state.get("sar_search_wall_seconds", 0.0),
+)
 
 if not st.session_state.sar_any_matched:
     st.success("No records found for the provided identifier(s).")
@@ -993,88 +1135,96 @@ _render_case_bar(
     total_rows,
 )
 
-action_col1, action_col2 = st.columns(2)
-with action_col1:
-    erase_clicked = st.button(
-        "Review & confirm erasure",
-        type="primary",
-        use_container_width=True,
-        disabled=total_selected == 0,
+ACTION_ACCESS_REPORT = "Generate an Art. 15 access report"
+ACTION_ERASURE = "Process an Art. 17 erasure request"
+
+st.write("**What would you like to do with these results?**")
+action_choice = st.radio(
+    "Action",
+    options=[ACTION_ACCESS_REPORT, ACTION_ERASURE],
+    label_visibility="collapsed",
+    horizontal=True,
+)
+
+continue_disabled = action_choice == ACTION_ERASURE and total_selected == 0
+if action_choice == ACTION_ERASURE:
+    st.caption(
+        "Select at least one row above before continuing."
+        if continue_disabled
+        else "Covers only the rows selected above."
     )
-with action_col2:
-    report_clicked = st.button(
-        "Generate Art. 15 access report",
-        use_container_width=True,
-        help="Covers every row found above, regardless of erasure selection — "
-        "a subject's right of access isn't conditioned on what's marked for erasure.",
+else:
+    st.caption(
+        "Covers every row found above, regardless of erasure selection — "
+        "a subject's right of access isn't conditioned on what's marked for erasure."
     )
 
-if erase_clicked:
-    targets = [
-        TableErasureTarget(
-            full_name=card["full_name"],
-            provenance=card["provenance"],
-            matched_column_or_tag=card["matched_column_or_tag"],
-            selected_rows=card["original_df"].loc[edited.index[edited["Erase"]]],
-        )
-        for card, edited in edited_cards
-        if edited["Erase"].sum() > 0
-    ]
+if st.button("Continue", type="primary", use_container_width=True, disabled=continue_disabled):
+    if action_choice == ACTION_ERASURE:
+        targets = [
+            TableErasureTarget(
+                full_name=card["full_name"],
+                provenance=card["provenance"],
+                matched_column_or_tag=card["matched_column_or_tag"],
+                selected_rows=card["original_df"].loc[edited.index[edited["Erase"]]],
+            )
+            for card, edited in edited_cards
+            if edited["Erase"].sum() > 0
+        ]
 
-    sp_token = get_service_principal_token()
-    preview_client = DatabricksClient(sp_token)
-    previews = []
-    try:
-        executor = ErasureExecutor(preview_client)
-        for target in targets:
-            try:
-                method, _sql, clauses = executor.build_delete_sql(target)
-                sql_pretty = format_delete_sql_pretty(target.full_name, clauses)
-            except Exception as exc:  # noqa: BLE001
-                method, sql_pretty = "unknown", f"-- failed to build preview: {exc}"
-            previews.append((target, method, sql_pretty))
-    finally:
-        preview_client.close()
+        sp_token = get_service_principal_token()
+        preview_client = DatabricksClient(sp_token)
+        previews = []
+        try:
+            executor = ErasureExecutor(preview_client)
+            for target in targets:
+                try:
+                    method, _sql, clauses = executor.build_delete_sql(target)
+                    sql_pretty = format_delete_sql_pretty(target.full_name, clauses)
+                except Exception as exc:  # noqa: BLE001
+                    method, sql_pretty = "unknown", f"-- failed to build preview: {exc}"
+                previews.append((target, method, sql_pretty))
+        finally:
+            preview_client.close()
 
-    st.session_state.sar_pending_targets = targets
-    st.session_state.sar_pending_previews = previews
-    _render_confirm_dialog()
+        st.session_state.sar_pending_targets = targets
+        st.session_state.sar_pending_previews = previews
+        _render_confirm_dialog()
+    else:
+        sp_token = get_service_principal_token()
+        meta_client = DatabricksClient(sp_token)
+        full_names = [card["full_name"] for card in cards]
+        searched_tags = set(st.session_state.get("sar_selected_tags", []))
+        try:
+            with st.spinner("Loading column tags, retention, and table descriptions…"):
+                retention_df = get_retention_info(meta_client, full_names)
+                comments = get_table_comments(meta_client, full_names)
 
-if report_clicked:
-    sp_token = get_service_principal_token()
-    meta_client = DatabricksClient(sp_token)
-    full_names = [card["full_name"] for card in cards]
-    searched_tags = set(st.session_state.get("sar_selected_tags", []))
-    try:
-        with st.spinner("Loading column tags, retention, and table descriptions…"):
-            retention_df = get_retention_info(meta_client, full_names)
-            comments = get_table_comments(meta_client, full_names)
+                review_tables = []
+                for card in cards:
+                    tagged = get_all_tagged_columns(meta_client, card["full_name"])
+                    tag_by_col = {col: tag for tag, cols in tagged.items() for col in cols}
+                    all_columns = list(card["original_df"].columns)
+                    default_include = {
+                        col: (tag_by_col.get(col) in searched_tags) or (col not in tag_by_col)
+                        for col in all_columns
+                    }
+                    review_tables.append({
+                        "full_name": card["full_name"],
+                        "provenance": card["provenance"],
+                        "matched_column_or_tag": card["matched_column_or_tag"],
+                        "rows": card["original_df"],
+                        "all_columns": all_columns,
+                        "tag_by_col": tag_by_col,
+                        "default_include": default_include,
+                    })
+        finally:
+            meta_client.close()
 
-            review_tables = []
-            for card in cards:
-                tagged = get_all_tagged_columns(meta_client, card["full_name"])
-                tag_by_col = {col: tag for tag, cols in tagged.items() for col in cols}
-                all_columns = list(card["original_df"].columns)
-                default_include = {
-                    col: (tag_by_col.get(col) in searched_tags) or (col not in tag_by_col)
-                    for col in all_columns
-                }
-                review_tables.append({
-                    "full_name": card["full_name"],
-                    "provenance": card["provenance"],
-                    "matched_column_or_tag": card["matched_column_or_tag"],
-                    "rows": card["original_df"],
-                    "all_columns": all_columns,
-                    "tag_by_col": tag_by_col,
-                    "default_include": default_include,
-                })
-    finally:
-        meta_client.close()
-
-    st.session_state.sar_access_review_tables = review_tables
-    st.session_state.sar_access_retention_df = retention_df
-    st.session_state.sar_access_comments = comments
-    _render_access_report_dialog()
+        st.session_state.sar_access_review_tables = review_tables
+        st.session_state.sar_access_retention_df = retention_df
+        st.session_state.sar_access_comments = comments
+        _render_access_report_dialog()
 
 # ---------------------------------------------------------------------------
 # Last erasure result

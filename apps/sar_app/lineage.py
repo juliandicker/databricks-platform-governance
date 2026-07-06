@@ -1,8 +1,22 @@
 """Lineage traversal and display-table construction.
 
-``LineageClient`` performs iterative BFS over ``system.access.table_lineage``
-in both the upstream and downstream directions.  ``_relative_time`` is a
-module-private helper used exclusively by ``build_display_table``.
+``LineageClient`` performs iterative BFS over the deduplicated lineage-edge
+cache in ``admin.lineage_cache`` (``table_lineage_current`` /
+``column_lineage_current``), not the raw ``system.access.table_lineage`` /
+``column_lineage`` event logs directly. Those account-wide system tables are
+append-only — a single pipeline running daily for a year leaves ~365 rows
+for the same structural edge — so re-aggregating them from scratch on every
+interactive search doesn't scale to a real deployment with many pipelines
+and a full year of history (profiled at several seconds per query even
+against a small demo workspace). ``admin.lineage_cache`` holds one row per
+distinct edge ever observed, refreshed incrementally by
+``governance/refresh_lineage_cache.sql`` (scheduled) and
+``refresh_lineage_cache`` below (on-demand, same logic) — see
+``governance/create_lineage_cache_tables.sql`` for the full rationale and
+the staleness trade-off this accepts.
+
+``_relative_time`` is a module-private helper used exclusively by
+``build_display_table``.
 """
 
 from __future__ import annotations
@@ -51,16 +65,89 @@ def _is_table_full_name(name: object) -> bool:
     return name is not None and str(name).count(".") == 2
 
 
+def refresh_lineage_cache(client: DatabricksClient, lookback_days: int = 30) -> None:
+    """Incrementally MERGE recent system.access.* lineage events into admin.lineage_cache.
+
+    Same logic as ``governance/refresh_lineage_cache.sql`` (the scheduled
+    governance_daily task) — duplicated here rather than shared, since
+    Databricks Apps and Jobs deploy to separate filesystems and this app
+    can't read that file at runtime. Keep the two in sync if the cache
+    tables' schema changes. *lookback_days* defaults to 30 for the same
+    "safe for routine refreshes, widen for an initial backfill" reasoning
+    documented there; *client* should be the app's own service-principal
+    client, since data stewards only get read access to admin.lineage_cache
+    (see terraform/catalogs.tf: databricks_grants.admin_lineage_cache).
+    """
+    client.execute(f"""
+        MERGE INTO admin.lineage_cache.table_lineage_current AS tgt
+        USING (
+            SELECT
+                source_table_full_name,
+                target_table_full_name,
+                source_table_catalog,
+                target_table_catalog,
+                COALESCE(entity_type, 'unknown') AS entity_type,
+                MAX(event_time) AS last_seen
+            FROM system.access.table_lineage
+            WHERE source_table_full_name IS NOT NULL
+              AND target_table_full_name IS NOT NULL
+              AND source_table_full_name NOT RLIKE '_(drift|profile)_metrics$'
+              AND target_table_full_name NOT RLIKE '_(drift|profile)_metrics$'
+              AND event_date >= current_date() - {int(lookback_days)}
+            GROUP BY ALL
+        ) AS src
+        ON  tgt.source_table_full_name = src.source_table_full_name
+        AND tgt.target_table_full_name = src.target_table_full_name
+        WHEN MATCHED THEN UPDATE SET
+            source_table_catalog = src.source_table_catalog,
+            target_table_catalog = src.target_table_catalog,
+            entity_type           = src.entity_type,
+            last_seen             = src.last_seen
+        WHEN NOT MATCHED THEN INSERT (
+            source_table_full_name, target_table_full_name,
+            source_table_catalog, target_table_catalog, entity_type, last_seen
+        ) VALUES (
+            src.source_table_full_name, src.target_table_full_name,
+            src.source_table_catalog, src.target_table_catalog, src.entity_type, src.last_seen
+        )
+    """)
+
+    client.execute(f"""
+        MERGE INTO admin.lineage_cache.column_lineage_current AS tgt
+        USING (
+            SELECT
+                source_table_full_name,
+                source_column_name,
+                target_table_full_name,
+                target_column_name,
+                MAX(event_time) AS last_seen
+            FROM system.access.column_lineage
+            WHERE source_table_full_name IS NOT NULL
+              AND target_table_full_name IS NOT NULL
+              AND event_date >= current_date() - {int(lookback_days)}
+            GROUP BY ALL
+        ) AS src
+        ON  tgt.source_table_full_name = src.source_table_full_name
+        AND tgt.source_column_name     = src.source_column_name
+        AND tgt.target_table_full_name = src.target_table_full_name
+        AND tgt.target_column_name     = src.target_column_name
+        WHEN MATCHED THEN UPDATE SET last_seen = src.last_seen
+        WHEN NOT MATCHED THEN INSERT (
+            source_table_full_name, source_column_name, target_table_full_name, target_column_name, last_seen
+        ) VALUES (
+            src.source_table_full_name, src.source_column_name, src.target_table_full_name, src.target_column_name, src.last_seen
+        )
+    """)
+
+
 class LineageClient:
-    """Traverses ``system.access.table_lineage`` for upstream/downstream tables.
+    """Traverses ``admin.lineage_cache`` for upstream/downstream tables.
 
     Uses iterative BFS with a visited set to avoid cycles. Drift and profile
-    metrics tables (auto-generated by Lakehouse Monitoring) are excluded from
-    results and traversal in both directions.
+    metrics tables (auto-generated by Lakehouse Monitoring) are excluded at
+    cache-refresh time (see ``governance/refresh_lineage_cache.sql``), so
+    reads here don't need to filter them out again.
     """
-
-    _EXCLUDE_SUFFIX: str = r"_(drift|profile)_metrics$"
-    _LOOKBACK_DAYS: int = 365
 
     def __init__(self, client: DatabricksClient) -> None:
         self._client = client
@@ -149,12 +236,9 @@ class LineageClient:
                        source_column_name,
                        target_table_full_name,
                        target_column_name
-                FROM   system.access.column_lineage
+                FROM   admin.lineage_cache.column_lineage_current
                 WHERE  target_table_full_name IN ({table_in})
                   AND  target_column_name     IN ({col_in})
-                  AND  source_table_full_name IS NOT NULL
-                  AND  event_date             >= current_date() - {self._LOOKBACK_DAYS}
-                GROUP BY ALL
             """)
 
             if df.empty:
@@ -249,12 +333,9 @@ class LineageClient:
                        source_column_name,
                        target_table_full_name,
                        target_column_name
-                FROM   system.access.column_lineage
+                FROM   admin.lineage_cache.column_lineage_current
                 WHERE  source_table_full_name IN ({table_in})
                   AND  source_column_name     IN ({col_in})
-                  AND  target_table_full_name IS NOT NULL
-                  AND  event_date             >= current_date() - {self._LOOKBACK_DAYS}
-                GROUP BY ALL
             """)
 
             if df.empty:
@@ -369,14 +450,10 @@ class LineageClient:
                 {{filter_col}}                       AS matched_table,
                 {{result_col}}                       AS {{result_alias}},
                 {{catalog_col}}                      AS {{catalog_alias}},
-                COALESCE(entity_type, 'unknown')     AS entity_type,
-                MAX(event_time)                      AS last_seen
-            FROM system.access.table_lineage
+                entity_type,
+                last_seen
+            FROM admin.lineage_cache.table_lineage_current
             WHERE {{filter_col}} IN ({in_list})
-              AND {{result_col}} IS NOT NULL
-              AND {{result_col}} NOT RLIKE '{self._EXCLUDE_SUFFIX}'
-              AND event_date >= current_date() - {self._LOOKBACK_DAYS}
-            GROUP BY ALL
             ORDER BY last_seen DESC
         """
         if direction == "upstream":
