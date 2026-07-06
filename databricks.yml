@@ -8,6 +8,16 @@ variables:
       Resolved by name lookup — data_platform_admins-sql-warehouse is created by Terraform.
     lookup:
       warehouse: data_platform_admins-sql-warehouse
+  platform_sp_id:
+    description: >
+      Application ID of the data_platform_admins team's service principal
+      (sp-data-platform), resolved by display name. Used to pin run_as on
+      the governance/lineage-cache jobs (resources/jobs/*.yml) so they
+      always execute as this SP regardless of which identity deployed the
+      bundle — dbplat-simple-github-actions (the CI/OIDC deploy identity)
+      is meant only to deploy, never to execute governance SQL itself.
+    lookup:
+      service_principal: sp-data-platform
 
 sync:
   exclude:

@@ -683,14 +683,42 @@ def _render_access_report_dialog() -> None:
             if comment_info.get("table_comment"):
                 st.caption(f"Table description: {comment_info['table_comment']}")
 
+            # A "Select all" checkbox forces a fresh st.data_editor instance
+            # (via the bumped generation counter folded into its key) rather
+            # than trying to mutate the widget's own tracked edit-state
+            # directly — st.data_editor only respects the DataFrame passed
+            # to it for a key it hasn't seen before, so bulk-setting every
+            # row requires giving it a new key. The callback uses default
+            # arguments to snapshot this iteration's full_name/keys — a
+            # plain closure over the loop variable would have every table's
+            # checkbox reference whichever table the loop last visited.
+            gen_key = f"access_cols_gen_{search_id}_{full_name}"
+            select_all_key = f"access_select_all_{search_id}_{full_name}"
+            st.session_state.setdefault(gen_key, 0)
+
+            def _toggle_all(full_name=full_name, select_all_key=select_all_key, gen_key=gen_key) -> None:
+                st.session_state[f"access_cols_force_{search_id}_{full_name}"] = st.session_state[select_all_key]
+                st.session_state[gen_key] += 1
+
+            force_value = st.session_state.pop(f"access_cols_force_{search_id}_{full_name}", None)
+            include_values = (
+                [force_value] * len(rt["all_columns"]) if force_value is not None
+                else [rt["default_include"][c] for c in rt["all_columns"]]
+            )
             checklist_df = pd.DataFrame({
                 "Column": rt["all_columns"],
                 "Tag": [rt["tag_by_col"].get(c, "—") for c in rt["all_columns"]],
-                "Include": [rt["default_include"][c] for c in rt["all_columns"]],
+                "Include": include_values,
             })
+
+            # header_placeholder reserves a row above the table for the
+            # "Select all" control, right-aligned within it — filled in
+            # after the table renders (via .container()) since the live
+            # count depends on `edited`, which doesn't exist until then.
+            header_placeholder = st.empty()
             edited = st.data_editor(
                 checklist_df,
-                key=f"access_cols_{search_id}_{full_name}",
+                key=f"access_cols_{search_id}_{full_name}_{st.session_state[gen_key]}",
                 hide_index=True,
                 use_container_width=True,
                 disabled=["Column", "Tag"],
@@ -702,6 +730,35 @@ def _render_access_report_dialog() -> None:
                     )
                 },
             )
+
+            # One widget with the count folded into its own label, rather
+            # than a separate caption in an adjacent column — two widgets
+            # side by side in different st.columns() always show a visible
+            # gutter/misalignment between them; a single label has none.
+            # Right-aligned via the same st.container(key=...) + targeted
+            # CSS technique the lineage review cards already use elsewhere
+            # in this file, rather than approximating the position with
+            # column-width ratios — pixel-exact regardless of how long the
+            # "X/Y selected" text is. Streamlit's vertical block containers
+            # are `flex-direction: column` by default, so `justify-content`
+            # controls vertical position, not horizontal — align-items is
+            # the one that controls the cross (horizontal) axis here.
+            selected_count = int(edited["Include"].sum())
+            total_count = len(edited)
+            control_key = f"access_header_{search_id}_{full_name}".replace(".", "_")
+            with header_placeholder.container():
+                st.markdown(
+                    f'<style>.st-key-{control_key} {{ display: flex; flex-direction: column; align-items: flex-end; }}</style>',
+                    unsafe_allow_html=True,
+                )
+                with st.container(key=control_key):
+                    st.checkbox(
+                        f"Select all — {selected_count}/{total_count} selected",
+                        value=(selected_count == total_count),
+                        key=select_all_key,
+                        on_change=_toggle_all,
+                    )
+
             included = list(edited.loc[edited["Include"], "Column"])
             redacted = [c for c in rt["tag_by_col"] if c not in included]
 
@@ -718,7 +775,6 @@ def _render_access_report_dialog() -> None:
         "Purpose of processing (required — included in the report, not stored in the audit trail)",
         placeholder="e.g. Providing and administering travel booking services for the data subject.",
     )
-    can_confirm = bool(purpose.strip())
 
     col1, col2 = st.columns(2)
     with col1:
@@ -727,12 +783,17 @@ def _render_access_report_dialog() -> None:
                 st.session_state.pop(key, None)
             st.rerun()
     with col2:
-        if st.button(
-            "Generate report",
-            type="primary",
-            use_container_width=True,
-            disabled=not can_confirm,
-        ):
+        # Not gated by a `disabled=` flag tied to the purpose field's current
+        # value — st.text_area only syncs to the script on blur/Ctrl+Enter,
+        # so a disabled button would stay visibly (and un-clickably) greyed
+        # out while the reviewer is still typing, well after they've entered
+        # real text. Validating on click instead means the button is always
+        # responsive; an empty purpose just shows an inline error rather than
+        # silently refusing to react to a genuine click.
+        if st.button("Generate report", type="primary", use_container_width=True):
+            if not purpose.strip():
+                st.error("Purpose of processing is required.")
+                return
             _touch_watchdog()
             sp_token = get_service_principal_token()
             exec_client = DatabricksClient(sp_token)
@@ -1055,9 +1116,33 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
         with st.container(key=container_key, border=True):
             header = st.empty()
 
-            editor_key = f"editor_{search_id}_{provenance}_{card['full_name']}"
+            # Same "Select all" pattern as the access-report column checklist
+            # (apps/sar_app/app.py: _render_access_report_dialog) — a bumped
+            # generation counter forces a fresh st.data_editor instance since
+            # it only respects the DataFrame passed to it for a key it hasn't
+            # seen before. Default arguments snapshot this iteration's card/
+            # provenance for the callback — a plain closure over the loop
+            # variables would have every card's checkbox reference whichever
+            # card the loop last visited.
+            full_name = card["full_name"]
+            gen_key = f"erase_gen_{search_id}_{provenance}_{full_name}"
+            select_all_key = f"erase_select_all_{search_id}_{provenance}_{full_name}"
+            force_key = f"erase_force_{search_id}_{provenance}_{full_name}"
+            st.session_state.setdefault(gen_key, 0)
+
+            def _toggle_all_rows(force_key=force_key, select_all_key=select_all_key, gen_key=gen_key) -> None:
+                st.session_state[force_key] = st.session_state[select_all_key]
+                st.session_state[gen_key] += 1
+
+            force_value = st.session_state.pop(force_key, None)
+            display_df = card["df"]
+            if force_value is not None:
+                display_df = display_df.copy()
+                display_df["Erase"] = force_value
+
+            editor_key = f"editor_{search_id}_{provenance}_{full_name}_{st.session_state[gen_key]}"
             edited = st.data_editor(
-                card["df"],
+                display_df,
                 key=editor_key,
                 hide_index=True,
                 use_container_width=True,
@@ -1089,23 +1174,40 @@ for provenance, heading, caption in PROVENANCE_SECTIONS:
                 f'border:1px solid rgba(127,140,160,0.22);border-radius:5px;padding:3px 9px;'
                 f'font-family:ui-monospace,monospace;">VACUUM: {card["vacuum_retention"]}</span>'
             )
-            header.markdown(
-                f'''<div style="display:flex;align-items:center;justify-content:space-between;
-                            flex-wrap:wrap;gap:10px;margin-bottom:10px;">
-                  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                    <span style="font-family:ui-monospace,monospace;font-size:0.9375rem;font-weight:600;">
-                      {card["full_name"]}
-                    </span>
-                    {badge_html}
-                    {chip_html}
-                    {vacuum_chip_html}
-                  </div>
-                  <span style="font-size:0.8125rem;color:#8b93a7;white-space:nowrap;">
-                    {n_selected} of {len(edited)} selected
-                  </span>
-                </div>''',
-                unsafe_allow_html=True,
-            )
+            with header.container():
+                left_col, right_col = st.columns([3, 2])
+                with left_col:
+                    st.markdown(
+                        f'''<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;">
+                          <span style="font-family:ui-monospace,monospace;font-size:0.9375rem;font-weight:600;">
+                            {card["full_name"]}
+                          </span>
+                          {badge_html}
+                          {chip_html}
+                          {vacuum_chip_html}
+                        </div>''',
+                        unsafe_allow_html=True,
+                    )
+                with right_col:
+                    # align-items (not justify-content) is the one that
+                    # controls horizontal position here — Streamlit's
+                    # vertical block containers are flex-direction: column
+                    # by default, so justify-content would control vertical
+                    # placement instead (see the access-report dialog's
+                    # identical control for the same lesson learned).
+                    select_all_container_key = f"erase_select_all_wrap_{search_id}_{provenance}_{full_name}".replace(".", "_")
+                    st.markdown(
+                        f'<style>.st-key-{select_all_container_key} '
+                        f'{{ display: flex; flex-direction: column; align-items: flex-end; }}</style>',
+                        unsafe_allow_html=True,
+                    )
+                    with st.container(key=select_all_container_key):
+                        st.checkbox(
+                            f"Select all — {n_selected}/{len(edited)} selected",
+                            value=(n_selected == len(edited)),
+                            key=select_all_key,
+                            on_change=_toggle_all_rows,
+                        )
 
 # ---------------------------------------------------------------------------
 # Erasure review / confirm

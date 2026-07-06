@@ -13,6 +13,17 @@ resources:
         exactly one place — the SQL file — rather than duplicated into the
         app's own Python.
 
+      # Pinned so this always executes as the platform team's own SP,
+      # regardless of who deployed the bundle or who triggers a run
+      # (governance_daily's schedule, or the app's on-demand button via
+      # jobs.run_now()) — dbplat-simple-github-actions (the CI/OIDC deploy
+      # identity) is meant only to deploy, never to execute governance SQL
+      # itself. Confirmed necessary: without this, a run failed with
+      # INSUFFICIENT_PERMISSIONS on system.access, tracing back to the CI
+      # deploy identity being the job's default run-as.
+      run_as:
+        service_principal_name: ${var.platform_sp_id}
+
       parameters:
         - name: lineage_cache_lookback_days
           default: "30"

@@ -7,6 +7,13 @@ resources:
         applies catalog-level ABAC policies on silver and gold.
         Idempotent (CREATE OR REPLACE) — safe to re-run manually at any time.
 
+      # Pinned so this always executes as the platform team's own SP,
+      # regardless of which identity deployed/triggered it —
+      # dbplat-simple-github-actions (the CI/OIDC deploy identity) is meant
+      # only to deploy the bundle, not to run governance SQL itself.
+      run_as:
+        service_principal_name: ${var.platform_sp_id}
+
       tasks:
         - task_key: create_udfs
           description: "Create type-specific masking UDFs in admin.shared"
@@ -64,6 +71,10 @@ resources:
         quartz_cron_expression: "0 0 1 * * ?"
         timezone_id: "Europe/London"
         pause_status: PAUSED
+
+      # See governance_setup's run_as comment above — same reasoning.
+      run_as:
+        service_principal_name: ${var.platform_sp_id}
 
       tasks:
         - task_key: apply_auto_ttl
