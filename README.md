@@ -27,7 +27,12 @@ Nothing in the infra repo ever triggers a deploy here — its GitHub App is scop
 | `resources/dashboards/*.yml`, `dashboards/*.lvdash.json` | Platform Data Governance and Access Audit dashboards |
 | `docs/sar-app.md` | Full SAR app documentation, including local dev |
 | `docs/governed-tag-grants.md` | Manual procedure for governed-tag `ASSIGN` grants (not API-manageable) |
+| `docs/access-and-pii-governance.md` | Catalog grants, ABAC column masking, governed tags, Entra groups/AIM, Access Audit dashboard |
+| `docs/data-lifecycle-governance.md` | Platform metadata columns, freshness SLAs, Auto TTL/retention, governance jobs, Data Governance dashboard |
+| `docs/data-product-teams.md` | Data mesh team model, SQL warehouses, serverless cost governance/budgets, landing zone |
 | `scripts/run-sar-app-local.ps1` | Runs the SAR app locally against the real deployed workspace — see "Local development" below |
+
+All docs live here now, including topics that describe infra-repo resources (catalog grants, Entra groups/AIM, data mesh teams) — kept alongside the governance content they're intertwined with rather than split across both repos. A few cross-references to specific `terraform/*.tf` resources point at the infra repo, called out explicitly where they occur.
 
 ## Naming contract with the infra repo
 

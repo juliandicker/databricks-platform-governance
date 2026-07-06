@@ -26,7 +26,7 @@ Row targeting uses the table's Unity Catalog primary key if one is declared, oth
 
 ### Audit trail — `admin.erasure`
 
-Every request writes to `admin.erasure` (owned by the `data_platform_admins` team, same Terraform mechanism as any domain team's schemas — see `terraform/data-product-teams.tf` + `terraform/catalogs.tf: databricks_grants.admin_erasure`):
+Every request writes to `admin.erasure` (owned by the `data_platform_admins` team, same Terraform mechanism as any domain team's schemas — see the infra repo's `terraform/data-product-teams.tf` + `terraform/catalogs.tf: databricks_grants.admin_erasure`):
 
 | Table | Purpose |
 |---|---|
@@ -49,7 +49,7 @@ On first deploy against a workspace with lineage history older than the default 
 
 **Staleness trade-off**: a brand-new lineage edge won't appear in search results until the next refresh. Lineage structure — which tables feed which — changes on the order of days/weeks in practice, not intraday, so this is accepted rather than re-scanning a year of account-wide event logs on every interactive search.
 
-Since triggering a job run and reading `admin.lineage_cache` are the only two things the app needs, its access footprint stays narrow: the `resources/apps/sar.yml` job resource declaration grants the app `CAN_MANAGE_RUN` on `lineage_cache_refresh` specifically (not broader Jobs access), and `terraform/catalogs.tf: databricks_grants.admin_lineage_cache` grants the app SP `SELECT` only — never `MODIFY`, and never any access to `system.access.*` at all, since the actual write happens under the triggered job's own run-as identity, not the app's. Grants otherwise mirror `admin_erasure`/`admin_access`: the platform team's SP owns the schema, data stewards get read-only access.
+Since triggering a job run and reading `admin.lineage_cache` are the only two things the app needs, its access footprint stays narrow: the `resources/apps/sar.yml` job resource declaration grants the app `CAN_MANAGE_RUN` on `lineage_cache_refresh` specifically (not broader Jobs access), and the infra repo's `terraform/catalogs.tf: databricks_grants.admin_lineage_cache` grants the app SP `SELECT` only — never `MODIFY`, and never any access to `system.access.*` at all, since the actual write happens under the triggered job's own run-as identity, not the app's. Grants otherwise mirror `admin_erasure`/`admin_access`: the platform team's SP owns the schema, data stewards get read-only access.
 
 The four lineage queries a search makes — table-lineage upstream, table-lineage downstream, column-lineage upstream trace, column-lineage downstream trace — are independent of each other and run **concurrently** (`concurrent.futures.ThreadPoolExecutor`, each on its own connection, since a single `DatabricksClient`'s SQL connection isn't safe to share across threads), turning their combined cost into roughly the slowest single one instead of their sum. A collapsed-by-default "⏱️ Search performance breakdown" expander on the results page shows per-phase and per-table timings for diagnosing where a slow search is actually spending its time.
 
@@ -81,7 +81,7 @@ Same reasoning as the "Download as CSV" CSS block above: that block stops *incid
 
 ### Audit trail — `admin.access`
 
-Every generated report writes to `admin.access` (same ownership/grant pattern as `admin.erasure` — see `terraform/catalogs.tf: databricks_grants.admin_access`):
+Every generated report writes to `admin.access` (same ownership/grant pattern as `admin.erasure` — see the infra repo's `terraform/catalogs.tf: databricks_grants.admin_access`):
 
 | Table | Purpose |
 |---|---|
