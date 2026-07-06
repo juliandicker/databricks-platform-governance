@@ -1,0 +1,27 @@
+resources:
+  jobs:
+    lineage_cache_refresh:
+      name: platform-lineage-cache-refresh
+      description: >
+        Incrementally refreshes admin.lineage_cache from
+        system.access.table_lineage/column_lineage (see
+        governance/refresh_lineage_cache.sql). A standalone job — not just a
+        task inside governance_daily — specifically so the SAR app can trigger
+        it on demand (via the "Refresh lineage cache now" sidebar button, see
+        apps/sar_app/lineage.py: trigger_lineage_cache_refresh) as well as it
+        running on governance_daily's schedule. This keeps the MERGE logic in
+        exactly one place — the SQL file — rather than duplicated into the
+        app's own Python.
+
+      parameters:
+        - name: lineage_cache_lookback_days
+          default: "30"
+
+      tasks:
+        - task_key: refresh
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file:
+              path: ${workspace.file_path}/governance/refresh_lineage_cache.sql
+            parameters:
+              lineage_cache_lookback_days: "{{job.parameters.lineage_cache_lookback_days}}"

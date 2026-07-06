@@ -56,18 +56,14 @@ resources:
       description: >
         Scheduled daily monitoring job. Applies Auto TTL to tables with a
         _delete_at column, computes freshness metrics, rebuilds the
-        admin.shared.retention_compliance view, and refreshes the SAR app's
-        lineage-edge cache. Paused by default in demo environments — unpause
-        in the Databricks UI when needed.
+        admin.shared.retention_compliance view, and triggers a refresh of the
+        SAR app's lineage-edge cache. Paused by default in demo environments —
+        unpause in the Databricks UI when needed.
 
       schedule:
         quartz_cron_expression: "0 0 1 * * ?"
         timezone_id: "Europe/London"
         pause_status: PAUSED
-
-      parameters:
-        - name: lineage_cache_lookback_days
-          default: "30"
 
       tasks:
         - task_key: apply_auto_ttl
@@ -105,10 +101,6 @@ resources:
             warehouse_id: ${var.warehouse_id}
 
         - task_key: refresh_lineage_cache
-          description: "Incrementally refresh admin.lineage_cache from system.access.table_lineage/column_lineage"
-          sql_task:
-            warehouse_id: ${var.warehouse_id}
-            file:
-              path: ${workspace.file_path}/governance/refresh_lineage_cache.sql
-            parameters:
-              lineage_cache_lookback_days: "{{job.parameters.lineage_cache_lookback_days}}"
+          description: "Trigger the standalone lineage_cache_refresh job (see resources/jobs/lineage_cache_refresh.yml) — kept as its own job, not an inline task here, so the SAR app can also trigger it on demand"
+          run_job_task:
+            job_id: ${resources.jobs.lineage_cache_refresh.id}

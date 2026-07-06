@@ -9,11 +9,12 @@ for the same structural edge — so re-aggregating them from scratch on every
 interactive search doesn't scale to a real deployment with many pipelines
 and a full year of history (profiled at several seconds per query even
 against a small demo workspace). ``admin.lineage_cache`` holds one row per
-distinct edge ever observed, refreshed incrementally by
-``governance/refresh_lineage_cache.sql`` (scheduled) and
-``refresh_lineage_cache`` below (on-demand, same logic) — see
-``governance/create_lineage_cache_tables.sql`` for the full rationale and
-the staleness trade-off this accepts.
+distinct edge ever observed, refreshed incrementally by the
+``lineage_cache_refresh`` Databricks Job (``governance/refresh_lineage_cache.sql``
+— see ``governance/create_lineage_cache_tables.sql`` for the full rationale
+and the staleness trade-off this accepts). ``trigger_lineage_cache_refresh``
+below triggers that same job on demand rather than re-implementing its SQL —
+the MERGE logic lives in exactly one place.
 
 ``_relative_time`` is a module-private helper used exclusively by
 ``build_display_table``.
@@ -21,7 +22,13 @@ the staleness trade-off this accepts.
 
 from __future__ import annotations
 
+import os
+from datetime import timedelta
+
 import pandas as pd
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import OperationFailed
+from databricks.sdk.service.jobs import RunResultState
 
 from database import DatabricksClient
 
@@ -65,79 +72,59 @@ def _is_table_full_name(name: object) -> bool:
     return name is not None and str(name).count(".") == 2
 
 
-def refresh_lineage_cache(client: DatabricksClient, lookback_days: int = 30) -> None:
-    """Incrementally MERGE recent system.access.* lineage events into admin.lineage_cache.
+def trigger_lineage_cache_refresh(lookback_days: int = 30, timeout_seconds: int = 180) -> tuple[bool, str]:
+    """Trigger the ``lineage_cache_refresh`` job now and wait for it to finish.
 
-    Same logic as ``governance/refresh_lineage_cache.sql`` (the scheduled
-    governance_daily task) — duplicated here rather than shared, since
-    Databricks Apps and Jobs deploy to separate filesystems and this app
-    can't read that file at runtime. Keep the two in sync if the cache
-    tables' schema changes. *lookback_days* defaults to 30 for the same
-    "safe for routine refreshes, widen for an initial backfill" reasoning
-    documented there; *client* should be the app's own service-principal
-    client, since data stewards only get read access to admin.lineage_cache
-    (see terraform/catalogs.tf: databricks_grants.admin_lineage_cache).
+    The MERGE logic that actually refreshes admin.lineage_cache lives in
+    exactly one place — governance/refresh_lineage_cache.sql, owned by the
+    standalone ``lineage_cache_refresh`` job (resources/jobs/lineage_cache_refresh.yml)
+    that governance_daily's schedule also triggers via a run_job_task. This
+    function triggers the same job on demand rather than re-implementing its
+    SQL in Python, so there is never a second copy to keep in sync.
+
+    Requires the ``LINEAGE_CACHE_REFRESH_JOB_ID`` env var, resolved via
+    app.yaml's ``valueFrom: 'lineage-cache-refresh-job'`` binding to the job
+    resource declared in resources/apps/sar.yml — like
+    ``DATABRICKS_WAREHOUSE_ID``, this only resolves inside a deployed bundle,
+    not under local ``apps run-local`` (see docs/sar-app.md).
+
+    Runs as the app's own identity (``WorkspaceClient()``'s ambient auth,
+    same as ``get_service_principal_token()`` elsewhere in this app) —
+    the app resource declaration grants it CAN_MANAGE_RUN on this specific
+    job, so it never needs direct read/write access to admin.lineage_cache
+    or system.access.* itself; the job's own configured identity does the
+    actual work.
+
+    Returns ``(success, message)`` for the caller to show the reviewer.
     """
-    client.execute(f"""
-        MERGE INTO admin.lineage_cache.table_lineage_current AS tgt
-        USING (
-            SELECT
-                source_table_full_name,
-                target_table_full_name,
-                source_table_catalog,
-                target_table_catalog,
-                COALESCE(entity_type, 'unknown') AS entity_type,
-                MAX(event_time) AS last_seen
-            FROM system.access.table_lineage
-            WHERE source_table_full_name IS NOT NULL
-              AND target_table_full_name IS NOT NULL
-              AND source_table_full_name NOT RLIKE '_(drift|profile)_metrics$'
-              AND target_table_full_name NOT RLIKE '_(drift|profile)_metrics$'
-              AND event_date >= current_date() - {int(lookback_days)}
-            GROUP BY ALL
-        ) AS src
-        ON  tgt.source_table_full_name = src.source_table_full_name
-        AND tgt.target_table_full_name = src.target_table_full_name
-        WHEN MATCHED THEN UPDATE SET
-            source_table_catalog = src.source_table_catalog,
-            target_table_catalog = src.target_table_catalog,
-            entity_type           = src.entity_type,
-            last_seen             = src.last_seen
-        WHEN NOT MATCHED THEN INSERT (
-            source_table_full_name, target_table_full_name,
-            source_table_catalog, target_table_catalog, entity_type, last_seen
-        ) VALUES (
-            src.source_table_full_name, src.target_table_full_name,
-            src.source_table_catalog, src.target_table_catalog, src.entity_type, src.last_seen
+    job_id = os.getenv("LINEAGE_CACHE_REFRESH_JOB_ID")
+    if not job_id:
+        return False, (
+            "LINEAGE_CACHE_REFRESH_JOB_ID is not set — this only resolves inside "
+            "a deployed app, not under local `apps run-local`."
         )
-    """)
 
-    client.execute(f"""
-        MERGE INTO admin.lineage_cache.column_lineage_current AS tgt
-        USING (
-            SELECT
-                source_table_full_name,
-                source_column_name,
-                target_table_full_name,
-                target_column_name,
-                MAX(event_time) AS last_seen
-            FROM system.access.column_lineage
-            WHERE source_table_full_name IS NOT NULL
-              AND target_table_full_name IS NOT NULL
-              AND event_date >= current_date() - {int(lookback_days)}
-            GROUP BY ALL
-        ) AS src
-        ON  tgt.source_table_full_name = src.source_table_full_name
-        AND tgt.source_column_name     = src.source_column_name
-        AND tgt.target_table_full_name = src.target_table_full_name
-        AND tgt.target_column_name     = src.target_column_name
-        WHEN MATCHED THEN UPDATE SET last_seen = src.last_seen
-        WHEN NOT MATCHED THEN INSERT (
-            source_table_full_name, source_column_name, target_table_full_name, target_column_name, last_seen
-        ) VALUES (
-            src.source_table_full_name, src.source_column_name, src.target_table_full_name, src.target_column_name, src.last_seen
+    w = WorkspaceClient()
+    run = w.jobs.run_now(
+        job_id=int(job_id),
+        job_parameters={"lineage_cache_lookback_days": str(int(lookback_days))},
+    )
+    try:
+        result = run.result(timeout=timedelta(seconds=timeout_seconds))
+    except TimeoutError:
+        return False, (
+            f"Refresh job triggered (run_id={run.run_id}) but didn't finish within "
+            f"{timeout_seconds}s — check the Jobs UI for its current status."
         )
-    """)
+    except OperationFailed as exc:
+        return False, f"Refresh job (run_id={run.run_id}) failed to reach a terminal state: {exc}"
+
+    if result.state.result_state == RunResultState.SUCCESS:
+        return True, f"Lineage cache refreshed ({result.run_page_url})."
+    return False, (
+        f"Lineage cache refresh job finished with status "
+        f"{result.state.result_state}: {result.state.state_message} ({result.run_page_url})"
+    )
 
 
 class LineageClient:

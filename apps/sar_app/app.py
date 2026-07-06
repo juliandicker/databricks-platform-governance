@@ -46,7 +46,7 @@ from idle_watchdog import ensure_started as _ensure_watchdog_started
 from idle_watchdog import seconds_remaining as _watchdog_seconds_remaining
 from idle_watchdog import stop_app_now as _stop_app_now
 from idle_watchdog import touch as _touch_watchdog
-from lineage import LineageClient, refresh_lineage_cache
+from lineage import LineageClient, trigger_lineage_cache_refresh
 from lineage_view import STATUS_STYLE as _STATUS_STYLE
 from lineage_view import LineageEdge, LineageNode
 from lineage_view import card_container_key
@@ -290,27 +290,20 @@ def _render_watchdog_controls() -> None:
 def _render_lineage_cache_refresh() -> None:
     """Sidebar 'refresh now' escape hatch for admin.lineage_cache.
 
-    The cache normally refreshes on governance_daily's schedule (see
-    governance/refresh_lineage_cache.sql); this is for a steward who knows a
-    relevant pipeline ran very recently and doesn't want to wait for the next
-    scheduled refresh before an urgent search.
+    The cache normally refreshes on governance_daily's schedule; this is for
+    a steward who knows a relevant pipeline ran very recently and doesn't
+    want to wait for the next scheduled refresh before an urgent search.
+    Triggers the same lineage_cache_refresh job governance_daily uses (see
+    apps/sar_app/lineage.py: trigger_lineage_cache_refresh) rather than
+    running the MERGE directly — only resolves inside a deployed app.
     """
     if st.button("🔄 Refresh lineage cache now", use_container_width=True):
-        try:
-            sp_token = get_service_principal_token()
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Could not acquire service-principal token: {exc}")
-            return
-        sp_client = DatabricksClient(sp_token)
-        try:
-            with st.spinner("Refreshing lineage cache…"):
-                refresh_lineage_cache(sp_client)
-        except Exception as exc:  # noqa: BLE001
-            st.error(f"Lineage cache refresh failed: {exc}")
+        with st.spinner("Refreshing lineage cache…"):
+            success, message = trigger_lineage_cache_refresh()
+        if success:
+            st.success(message)
         else:
-            st.success("Lineage cache refreshed.")
-        finally:
-            sp_client.close()
+            st.error(message)
 
 
 # ---------------------------------------------------------------------------

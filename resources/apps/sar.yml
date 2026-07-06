@@ -14,6 +14,10 @@ resources:
           sql_warehouse:
             id: ${var.warehouse_id}
             permission: "CAN_USE"
+        - name: "lineage-cache-refresh-job"
+          job:
+            id: ${resources.jobs.lineage_cache_refresh.id}
+            permission: "CAN_MANAGE_RUN"
 
       user_api_scopes:
         - sql
