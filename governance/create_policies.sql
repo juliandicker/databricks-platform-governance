@@ -1,10 +1,13 @@
 -- ABAC column mask policies — applied to silver and gold catalogs.
 -- Each policy fires when a column carries the matching governed tag(s).
--- Exceptions: pii_readers and data_stewards see unmasked data; team SPs and the
--- SAR app SP are exempt via {{job.parameters.exempt_sps}} (substituted at runtime
--- by the governance job) — the SAR app SP needs real values to execute an erasure
--- it already found via the calling user's own unmasked search; a masked WHERE
--- clause predicate against a masked column would never match the real row.
+-- Exceptions: pii_readers and data_stewards see unmasked data; sg-dbplat-data-product-sps
+-- (every team SP, sp-data-platform, and the SAR app SP — see the infra repo's terraform/data-product-teams.tf)
+-- is also exempt — the SAR app SP needs real values to execute an erasure it already
+-- found via the calling user's own unmasked search; a masked WHERE clause predicate
+-- against a masked column would never match the real row. This used to be a
+-- per-deploy CI-computed {{job.parameters.exempt_sps}} list substituted via sed before
+-- bundle deploy; collapsed into this one static group reference so the governance repo
+-- (no Terraform access of its own) doesn't need that value handed to it at all.
 --
 -- Multiple policies must not match the same column for the same user — Databricks
 -- returns an error rather than picking one. Tags are partitioned across policies
@@ -32,7 +35,7 @@
 CREATE OR REPLACE POLICY mask_sensitive_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_sensitive
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS (
   has_tag('class.name')               OR has_tag('class.vin')                    OR
   has_tag('class.driver_license')     OR has_tag('class.passport')               OR
@@ -45,43 +48,43 @@ FOR TABLES MATCH COLUMNS (
 CREATE OR REPLACE POLICY mask_email_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_email
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.email_address') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_dob_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_dob
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.date_of_birth') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_age_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_age
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.age') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_ip_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_ip
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.ip_address') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_credit_card_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_credit_card
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.credit_card') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_phone_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_phone
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.phone_number') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_location_columns
 ON CATALOG silver
 COLUMN MASK admin.shared.mask_location
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.location') AS c ON COLUMN c;
 
 -- ── gold ──────────────────────────────────────────────────────────────────────
@@ -89,7 +92,7 @@ FOR TABLES MATCH COLUMNS has_tag('class.location') AS c ON COLUMN c;
 CREATE OR REPLACE POLICY mask_sensitive_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_sensitive
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS (
   has_tag('class.name')               OR has_tag('class.vin')                    OR
   has_tag('class.driver_license')     OR has_tag('class.passport')               OR
@@ -102,42 +105,42 @@ FOR TABLES MATCH COLUMNS (
 CREATE OR REPLACE POLICY mask_email_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_email
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.email_address') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_dob_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_dob
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.date_of_birth') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_age_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_age
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.age') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_ip_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_ip
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.ip_address') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_credit_card_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_credit_card
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.credit_card') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_phone_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_phone
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.phone_number') AS c ON COLUMN c;
 
 CREATE OR REPLACE POLICY mask_location_columns
 ON CATALOG gold
 COLUMN MASK admin.shared.mask_location
-TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, {{job.parameters.exempt_sps}}
+TO `account users` EXCEPT `sg-dbplat-pii-readers`, `sg-dbplat-data-stewards`, `sg-dbplat-data-product-sps`
 FOR TABLES MATCH COLUMNS has_tag('class.location') AS c ON COLUMN c;
 
