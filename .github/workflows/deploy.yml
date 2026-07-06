@@ -1,0 +1,76 @@
+name: Deploy Governance Bundle
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "governance/**"
+      - "resources/**"
+      - "apps/**"
+      - "databricks.yml"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # AZURE_CLIENT_ID and DATABRICKS_HOST are pushed here as repo secrets by
+      # juliandicker/simple-databricks-deployment's apply.yml after every
+      # Terraform apply — this repo has no Terraform of its own and never reads
+      # infra state directly, mirroring how tfl-disruption-data-pipeline is
+      # enabled. AZURE_TENANT_ID is a plain secret set once (it never changes).
+      - name: Azure login (OIDC)
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Exchange Azure token for Databricks token
+        run: |
+          echo "DATABRICKS_TOKEN=$(az account get-access-token \
+            --resource 2ff814a6-3304-4ab8-85cb-cd0e6f879c1d \
+            --query accessToken -o tsv)" >> $GITHUB_ENV
+
+      - uses: databricks/setup-cli@main
+
+      - name: Deploy governance bundle
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+        run: databricks bundle deploy --force
+
+      - name: Start SAR app
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+        run: |
+          STATE=$(databricks apps get platform-sar-app -o json | python3 -c "import sys,json; print(json.load(sys.stdin)['compute_status']['state'])")
+          if [ "$STATE" = "ACTIVE" ]; then
+            echo "App compute is already ACTIVE, skipping start."
+          else
+            # `apps start` already waits for ACTIVE state internally (20m default timeout).
+            databricks apps start platform-sar-app
+          fi
+
+      - name: Deploy SAR app source
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+        run: databricks apps deploy platform-sar-app
+
+      # governance_setup runs as sp-data-platform, pinned via run_as in
+      # resources/jobs/governance.yml itself (resolved through databricks.yml's
+      # platform_sp_id lookup variable) — the same identity this workflow
+      # authenticates as, so no separate act-as/impersonation permission is
+      # needed here: an SP doesn't need permission to impersonate itself.
+      - name: Run governance setup
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+        run: databricks bundle run governance_setup
