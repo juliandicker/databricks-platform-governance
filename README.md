@@ -4,6 +4,31 @@ Unity Catalog governance for the [`simple-databricks-deployment`](https://github
 
 **This repo has no Terraform.** Everything here is DABs + SQL, deployed with `databricks bundle deploy` / `databricks bundle run`. This is deliberate: it's the **governance** half of a two-repo split, designed to be reusable unchanged on top of a future, differently-architected infra project (e.g. a VNet-injected one) — only the infra repo needs to change for that, not this one.
 
+## Features
+
+| Feature | What it does | Docs |
+|---|---|---|
+| ABAC column masking | Masks governed-tagged columns (PII, financial identifiers, etc.) in silver and gold for standard readers; data stewards, PII readers, and team SPs see raw data | [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) |
+| GDPR erasure (Article 17) | Search a subject across bronze/silver/gold, review matches, and execute an all-or-nothing delete — with time-travel restore while the VACUUM retention window holds | [`docs/sar-app.md`](docs/sar-app.md) |
+| GDPR access reports (Article 15) | Search, review per-table/per-column disclosure, and generate a subject access report | [`docs/sar-app.md`](docs/sar-app.md) |
+| Lineage-aware search | Traces upstream/downstream table lineage from a materialized "latest edge" cache, refreshed on a schedule or on demand, so search scales with account-wide lineage history | [`docs/sar-app.md`](docs/sar-app.md) |
+| Data lifecycle governance | Platform metadata columns, freshness SLAs, Auto TTL/retention, the retention-compliance view | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md) |
+| Data mesh team model | SQL warehouses, serverless cost governance/budgets, landing zone conventions | [`docs/data-product-teams.md`](docs/data-product-teams.md) |
+| Governance dashboards | Platform Data Governance (freshness/retention compliance) and Access Audit dashboards | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md), [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) |
+| Governed tag grants | Manual account-level `ASSIGN` grant procedure (not API-manageable) | [`docs/governed-tag-grants.md`](docs/governed-tag-grants.md) |
+
+## Documentation
+
+| Doc | Covers |
+|---|---|
+| [`docs/sar-app.md`](docs/sar-app.md) | The SAR app end to end: search, GDPR erasure and access reports, lineage cache, local dev |
+| [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) | Catalog grants, ABAC column masking, governed tags, Entra groups/AIM, Access Audit dashboard |
+| [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md) | Platform metadata columns, freshness SLAs, Auto TTL/retention, governance jobs, Data Governance dashboard |
+| [`docs/data-product-teams.md`](docs/data-product-teams.md) | Data mesh team model, SQL warehouses, serverless cost governance/budgets, landing zone |
+| [`docs/governed-tag-grants.md`](docs/governed-tag-grants.md) | Manual governed-tag `ASSIGN` grant procedure |
+
+All docs live here, including topics that describe infra-repo resources (catalog grants, Entra groups/AIM, data mesh teams) — kept alongside the governance content they're intertwined with rather than split across both repos. A few cross-references to specific `terraform/*.tf` resources point at the infra repo, called out explicitly where they occur.
+
 ## How this repo is enabled
 
 There's no Terraform state, no `terraform init`, nothing to bootstrap here. The infra repo enables this one the same way it enables a downstream data pipeline repo:
@@ -23,16 +48,10 @@ Nothing in the infra repo ever triggers a deploy here — its GitHub App is scop
 | `governance/*.py` | Notebook tasks run by `governance_daily` (Auto TTL, freshness metrics) |
 | `resources/jobs/governance.yml` | `governance_setup` (every deploy: UDFs → policies → audit tables) and `governance_daily` (scheduled, paused by default) — both pinned `run_as: sp-data-platform` |
 | `resources/jobs/lineage_cache_refresh.yml` | Standalone job refreshing `admin.lineage_cache`, triggerable by schedule or on-demand from the SAR app |
-| `resources/apps/sar.yml`, `apps/sar_app/` | The SAR Streamlit app — see [`docs/sar-app.md`](docs/sar-app.md) |
+| `resources/apps/sar.yml`, `apps/sar_app/` | The SAR Streamlit app |
 | `resources/dashboards/*.yml`, `dashboards/*.lvdash.json` | Platform Data Governance and Access Audit dashboards |
-| `docs/sar-app.md` | Full SAR app documentation, including local dev |
-| `docs/governed-tag-grants.md` | Manual procedure for governed-tag `ASSIGN` grants (not API-manageable) |
-| `docs/access-and-pii-governance.md` | Catalog grants, ABAC column masking, governed tags, Entra groups/AIM, Access Audit dashboard |
-| `docs/data-lifecycle-governance.md` | Platform metadata columns, freshness SLAs, Auto TTL/retention, governance jobs, Data Governance dashboard |
-| `docs/data-product-teams.md` | Data mesh team model, SQL warehouses, serverless cost governance/budgets, landing zone |
+| `docs/` | See "Documentation" above |
 | `scripts/run-sar-app-local.ps1` | Runs the SAR app locally against the real deployed workspace — see "Local development" below |
-
-All docs live here now, including topics that describe infra-repo resources (catalog grants, Entra groups/AIM, data mesh teams) — kept alongside the governance content they're intertwined with rather than split across both repos. A few cross-references to specific `terraform/*.tf` resources point at the infra repo, called out explicitly where they occur.
 
 ## Naming contract with the infra repo
 
