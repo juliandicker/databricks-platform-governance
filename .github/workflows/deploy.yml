@@ -60,10 +60,25 @@ jobs:
             databricks apps start platform-sar-app
           fi
 
+      # `apps deploy` needs an explicit --source-code-path for an app with no
+      # previous active deployment (first deploy from this repo, since the
+      # app object was recreated fresh here) — it can't infer it the way it
+      # can once an app has deployed at least once before. The path is
+      # resolved dynamically since it's identity-dependent (workspace.file_path
+      # is scoped to whichever identity ran `bundle deploy` — sp-data-platform
+      # here, not whoever authored this workflow).
+      - name: Resolve SAR app source path
+        id: bundle
+        env:
+          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+        run: |
+          SRC_PATH=$(databricks bundle summary -o json | python3 -c "import json,sys; print(json.load(sys.stdin)['resources']['apps']['sar_app']['source_code_path'])")
+          echo "source_path=$SRC_PATH" >> $GITHUB_OUTPUT
+
       - name: Deploy SAR app source
         env:
           DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
-        run: databricks apps deploy platform-sar-app
+        run: databricks apps deploy platform-sar-app --source-code-path "${{ steps.bundle.outputs.source_path }}"
 
       # governance_setup runs as sp-data-platform, pinned via run_as in
       # resources/jobs/governance.yml itself (resolved through databricks.yml's
