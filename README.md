@@ -13,7 +13,6 @@ Unity Catalog governance for the [`simple-databricks-deployment`](https://github
 | GDPR access reports (Article 15) | Search, review per-table/per-column disclosure, and generate a subject access report | [`docs/sar-app.md`](docs/sar-app.md) |
 | Lineage-aware search | Traces upstream/downstream table lineage from a materialized "latest edge" cache, refreshed on a schedule or on demand, so search scales with account-wide lineage history | [`docs/sar-app.md`](docs/sar-app.md) |
 | Data lifecycle governance | Platform metadata columns, freshness SLAs, Auto TTL/retention, the retention-compliance view | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md) |
-| Data mesh team model | SQL warehouses, serverless cost governance/budgets, landing zone conventions | [`docs/data-product-teams.md`](docs/data-product-teams.md) |
 | Governance dashboards | Platform Data Governance (freshness/retention compliance) and Access Audit dashboards | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md), [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) |
 | Governed tag grants | Manual account-level `ASSIGN` grant procedure (not API-manageable) | [`docs/governed-tag-grants.md`](docs/governed-tag-grants.md) |
 
