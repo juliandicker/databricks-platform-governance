@@ -35,6 +35,8 @@ import erasure_review
 from access_report import (
     TableAccessTarget,
     build_report,
+    draft_purpose,
+    estimate_print_height,
     get_all_tagged_columns,
     get_retention_info,
     get_table_comments,
@@ -64,7 +66,7 @@ TAG_MAP: dict[str, str] = {
     "Email":               "class.email_address",
     "Date of Birth":       "class.date_of_birth",
     "Phone":               "class.phone_number",
-    "Postcode / Location": "class.location",
+    "Postcode":            "class.location",
 }
 
 SEARCHABLE_LAYERS: list[str] = ["silver", "gold"]
@@ -657,6 +659,40 @@ def _render_confirm_dialog() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Print-ready preview of the last generated access report
+# ---------------------------------------------------------------------------
+
+def _render_print_view() -> None:
+    """Full-page, chrome-free view of the last access report for Print -> Save as PDF.
+
+    Renders the report via components.html (a real iframe) rather than
+    st.markdown — st.markdown injects the report's <style> into the same
+    document as Streamlit's own theme CSS, which wins on text color and
+    produces illegible mixed-contrast output (verified: table headers render
+    as white-on-near-white). An iframe gives the report's CSS its own
+    document instead. Called from a st.stop()-guarded branch at the top of
+    the script, same pattern as the Review Erasure/Access Requests pages.
+    """
+    request_id, html_report, print_height = st.session_state.sar_access_last_result
+    st.markdown(
+        """<style>
+        [data-testid="stSidebar"] { display: none !important; }
+        [data-testid="stSidebarCollapsedControl"] { display: none !important; }
+        header[data-testid="stHeader"] { display: none !important; }
+        #MainMenu { display: none !important; }
+        footer { display: none !important; }
+        @media print { .stButton { display: none !important; } }
+        </style>""",
+        unsafe_allow_html=True,
+    )
+    if st.button("← Back to app"):
+        st.session_state.sar_print_view = False
+        st.rerun()
+    st.caption(f"Access report `{request_id}` — use your browser's Print → Save as PDF.")
+    components.html(html_report, height=print_height, scrolling=False)
+
+
+# ---------------------------------------------------------------------------
 # Access report dialog (GDPR Art. 15)
 # ---------------------------------------------------------------------------
 
@@ -769,11 +805,32 @@ def _render_access_report_dialog() -> None:
                 rows=rt["rows"],
                 included_columns=included,
                 redacted_columns=redacted,
+                column_tags=rt["tag_by_col"],
             ))
+
+    purpose_key = f"access_purpose_{search_id}"
+    purpose_control_key = f"access_purpose_header_{search_id}".replace(".", "_")
+    st.markdown(
+        f'<style>.st-key-{purpose_control_key} {{ display: flex; flex-direction: column; align-items: flex-end; }}</style>',
+        unsafe_allow_html=True,
+    )
+    with st.container(key=purpose_control_key):
+        if st.button(
+            "✨ Draft with AI",
+            key=f"access_purpose_draft_{search_id}",
+            help="Drafts from table/column names and descriptions only — never the "
+            "disclosed data itself. Always review before generating the report.",
+        ):
+            with st.spinner("Drafting purpose with AI..."):
+                try:
+                    st.session_state[purpose_key] = draft_purpose(targets, comments)
+                except Exception as e:
+                    st.error(f"Couldn't draft a purpose: {e}")
 
     purpose = st.text_area(
         "Purpose of processing (required — included in the report, not stored in the audit trail)",
         placeholder="e.g. Providing and administering travel booking services for the data subject.",
+        key=purpose_key,
     )
 
     col1, col2 = st.columns(2)
@@ -817,7 +874,9 @@ def _render_access_report_dialog() -> None:
                     )
             finally:
                 exec_client.close()
-            st.session_state.sar_access_last_result = (request_id, html_report)
+            st.session_state.sar_access_last_result = (
+                request_id, html_report, estimate_print_height(targets)
+            )
             for key in ("sar_access_review_tables", "sar_access_retention_df", "sar_access_comments"):
                 st.session_state.pop(key, None)
             st.rerun()
@@ -863,6 +922,10 @@ st.markdown(
     </style>""",
     unsafe_allow_html=True,
 )
+
+if st.session_state.get("sar_print_view") and "sar_access_last_result" in st.session_state:
+    _render_print_view()
+    st.stop()
 
 # A sidebar option_menu rather than st.navigation/st.Page — this keeps each
 # extra page a minimal, isolated addition (call the new module, st.stop())
@@ -1345,17 +1408,20 @@ if "sar_last_result" in st.session_state:
 # ---------------------------------------------------------------------------
 
 if "sar_access_last_result" in st.session_state:
-    request_id, html_report = st.session_state.sar_access_last_result
+    request_id, html_report, print_height = st.session_state.sar_access_last_result
     st.divider()
     st.subheader("Access Report Result")
     st.success(f"Access report `{request_id}` generated — recorded in `admin.access`.")
-    st.caption(
-        "Open the downloaded file in a browser tab and use Print → Save as PDF "
-        "for a handoff-ready document."
-    )
-    st.download_button(
-        "Download report (.html)",
-        data=html_report,
-        file_name=f"access-report-{request_id}.html",
-        mime="text/html",
-    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Print-ready preview", use_container_width=True):
+            st.session_state.sar_print_view = True
+            st.rerun()
+    with col2:
+        st.download_button(
+            "Download report (.html)",
+            data=html_report,
+            file_name=f"access-report-{request_id}.html",
+            mime="text/html",
+            use_container_width=True,
+        )

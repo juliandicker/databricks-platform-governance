@@ -18,6 +18,10 @@ resources:
           job:
             id: ${resources.jobs.lineage_cache_refresh.id}
             permission: "CAN_MANAGE_RUN"
+        - name: "purpose-draft-endpoint"
+          serving_endpoint:
+            name: "databricks-claude-3-7-sonnet"
+            permission: "CAN_QUERY"
 
       user_api_scopes:
         - sql

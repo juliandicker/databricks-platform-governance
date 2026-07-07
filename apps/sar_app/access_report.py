@@ -30,11 +30,14 @@ the erasure-feature design notes this mirrors):
 from __future__ import annotations
 
 import html
+import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pandas as pd
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.serving import ChatMessage, ChatMessageRole
 
 from database import DatabricksClient
 from erasure import _sql_string, _sql_timestamp
@@ -75,6 +78,7 @@ class TableAccessTarget:
     rows: pd.DataFrame           # every row this search matched for this table
     included_columns: list[str]  # reviewer-confirmed columns to disclose
     redacted_columns: list[str]  # class.*-tagged columns present but excluded
+    column_tags: dict[str, str]  # {column: class.* tag}, governed columns only
 
 
 def get_all_tagged_columns(client: DatabricksClient, full_name: str) -> dict[str, list[str]]:
@@ -147,6 +151,61 @@ def get_table_comments(client: DatabricksClient, full_names: list[str]) -> dict[
     return comments
 
 
+def draft_purpose(targets: list[TableAccessTarget], comments: dict[str, dict]) -> str:
+    """Draft a starting-point "purpose of processing" statement via an LLM, for the reviewer to edit.
+
+    Builds the prompt from schema-level facts only — table/column names,
+    table and column ``COMMENT``s, per-column governed tags, provenance — never
+    ``TableAccessTarget.rows``. Feeding the model the *disclosed rows
+    themselves* (rather than facts about the schema) would create a new
+    processing purpose and a new recipient (the model provider) needing its
+    own Art. 15(1)(c) disclosure, so that boundary is a hard invariant here,
+    not just a style choice — see docs/sar-app.md's "AI-drafted purpose"
+    section. Like ``get_table_comments``, this is a drafting aid only: the
+    result always lands in the still-editable purpose text box, never
+    submitted directly.
+    """
+    lines = []
+    for target in targets:
+        if not target.included_columns:
+            continue
+        info = comments.get(target.full_name, {})
+        lines.append(f"Table: {target.full_name} (found via {target.provenance} match on {target.matched_column_or_tag})")
+        if info.get("table_comment"):
+            lines.append(f"  Description: {info['table_comment']}")
+        column_comments = info.get("column_comments", {})
+        for col in target.included_columns:
+            tag = target.column_tags.get(col)
+            comment = column_comments.get(col)
+            lines.append(f"  Column: {col}")
+            if tag:
+                lines.append(f"    Tag: {tag}")
+            if comment:
+                lines.append(f"    Comment: {comment}")
+
+    if not lines:
+        return "Unable to draft a purpose — no tables with included columns to describe yet."
+
+    prompt = (
+        "You are drafting the \"purpose of processing\" statement for a GDPR "
+        "Article 15 subject access report. Based only on the schema metadata "
+        "below (table names, descriptions, column names and descriptions) — "
+        "not on any actual personal data, which you have not been given — "
+        "write a concise 1-3 sentence business purpose explaining why this "
+        "personal data is processed. Do not invent facts the metadata "
+        "doesn't support; if the metadata is too sparse to infer a purpose "
+        "confidently, say so plainly instead of guessing.\n\n" + "\n".join(lines)
+    )
+
+    endpoint = os.environ["PURPOSE_DRAFT_ENDPOINT"]
+    response = WorkspaceClient().serving_endpoints.query(
+        name=endpoint,
+        messages=[ChatMessage(role=ChatMessageRole.USER, content=prompt)],
+        max_tokens=300,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def hash_value(client: DatabricksClient, udf_name: str, val: str) -> str:
     """Call an ``admin.shared`` hashing UDF on a single value.
 
@@ -207,9 +266,13 @@ def build_report(
     """Assemble the final self-contained HTML disclosure document.
 
     A single string with inline CSS and no external resources — the
-    reviewer downloads it and can open it standalone in a browser and use
-    Print -> Save as PDF. Redacted columns are dropped entirely from the
-    per-table tables (Art. 15(4) is about *not disclosing* another
+    reviewer can download it and open it standalone in a browser, or view
+    it in-app via the print-ready preview (app.py: _render_print_view),
+    which embeds this HTML in an iframe over Streamlit's own (dark) theme —
+    hence the explicit ``background: #fff`` below rather than relying on a
+    browser's default page background. Either way, use Print -> Save as PDF
+    for a handoff-ready document. Redacted columns are dropped entirely from
+    the per-table tables (Art. 15(4) is about *not disclosing* another
     person's data, not about showing a masked placeholder).
     """
     categories = sorted({t.matched_column_or_tag for t in targets if t.matched_column_or_tag})
@@ -237,7 +300,9 @@ def build_report(
             for col in target.included_columns
         )
         body_rows = "".join(
-            "<tr>" + "".join(f"<td>{_esc(row[col])}</td>" for col in target.included_columns) + "</tr>"
+            "<tr>" + "".join(
+                f"<td><div class='cell'>{_esc(row[col])}</div></td>" for col in target.included_columns
+            ) + "</tr>"
             for _, row in target.rows.iterrows()
         )
 
@@ -248,10 +313,12 @@ def build_report(
              &middot; {len(target.rows)} row(s) &middot; {_retention_line(retention_df, target.full_name)}</p>
           {comment_note}
           {redacted_note}
-          <table>
-            <thead><tr>{header_cells}</tr></thead>
-            <tbody>{body_rows}</tbody>
-          </table>
+          <div class="table-scroll">
+            <table>
+              <thead><tr>{header_cells}</tr></thead>
+              <tbody>{body_rows}</tbody>
+            </table>
+          </div>
         </section>
         """)
 
@@ -261,20 +328,26 @@ def build_report(
 <meta charset="utf-8">
 <title>Subject Access Report — {_esc(request_id)}</title>
 <style>
-  body {{ font-family: -apple-system, Segoe UI, Arial, sans-serif; color: #1a1a1a; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }}
+  body {{ font-family: -apple-system, Segoe UI, Arial, sans-serif; color: #1a1a1a; background: #fff; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }}
   h1 {{ font-size: 1.5rem; }}
   h2 {{ font-size: 1.15rem; border-bottom: 1px solid #ccc; padding-bottom: 0.25rem; margin-top: 2rem; }}
   h3 {{ font-family: ui-monospace, monospace; font-size: 1rem; }}
   .meta {{ color: #555; font-size: 0.85rem; }}
   .redacted-note {{ color: #8a5300; font-size: 0.85rem; }}
   .comment-note {{ color: #444; font-size: 0.85rem; }}
-  table {{ border-collapse: collapse; width: 100%; margin: 0.5rem 0 1.5rem; font-size: 0.85rem; }}
+  .table-scroll {{ max-width: 100%; overflow-x: auto; margin: 0.5rem 0 1.5rem; }}
+  table {{ border-collapse: collapse; width: max-content; font-size: 0.85rem; }}
   th, td {{ border: 1px solid #ccc; padding: 4px 8px; text-align: left; vertical-align: top; }}
   th {{ background: #f2f2f2; }}
+  .cell {{ display: inline-block; max-width: 300px; overflow-wrap: break-word; }}
   .col-comment {{ font-weight: normal; color: #666; font-size: 0.75rem; }}
   @media print {{
-    body {{ margin: 0; }}
+    @page {{ size: landscape; }}
+    body {{ margin: 0; max-width: none; }}
     .table-section {{ page-break-inside: avoid; }}
+    .table-scroll {{ overflow-x: visible; }}
+    table {{ font-size: 0.7rem; }}
+    th, td {{ padding: 2px 4px; }}
   }}
 </style>
 </head>
@@ -306,6 +379,18 @@ def build_report(
   <p>{RIGHTS_BOILERPLATE}</p>
 </body>
 </html>"""
+
+
+def estimate_print_height(targets: list[TableAccessTarget]) -> int:
+    """Rough pixel height for embedding ``build_report``'s output via ``components.html``.
+
+    A fixed-height iframe that's too short silently clips content instead of
+    scaling to fit the printed page — for a GDPR disclosure document that's a
+    correctness bug, not a cosmetic one, so this deliberately over-estimates
+    (a bit of trailing blank space costs at most one extra printed page).
+    """
+    total_rows = sum(len(t.rows) for t in targets)
+    return min(20000, 700 + len(targets) * 150 + total_rows * 34)
 
 
 def write_access_request(

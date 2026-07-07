@@ -4,6 +4,8 @@ env:
     valueFrom: 'sql-warehouse'
   - name: LINEAGE_CACHE_REFRESH_JOB_ID
     valueFrom: 'lineage-cache-refresh-job'
+  - name: PURPOSE_DRAFT_ENDPOINT
+    valueFrom: 'purpose-draft-endpoint'
   - name: STREAMLIT_GATHER_USAGE_STATS
     value: 'false'
   - name: IDLE_TIMEOUT_MINUTES

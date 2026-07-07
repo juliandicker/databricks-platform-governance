@@ -19,6 +19,10 @@
         instead) and passes it as LINEAGE_CACHE_REFRESH_JOB_ID, since
         app.yaml's `valueFrom` binding for it only resolves inside a
         deployed app, same as the warehouse ID
+      - passes PURPOSE_DRAFT_ENDPOINT as a fixed literal (unlike the
+        warehouse/job IDs, the Foundation Model endpoint name isn't a
+        per-workspace dynamic ID to look up — it's the same literal as
+        resources/apps/sar.yml's serving_endpoint.name)
       - fetches a fresh OAuth token (tokens last about an hour; a
         long-running `run-local` process keeps using the token it launched
         with, so restart via this script rather than reusing an old window)
@@ -96,6 +100,7 @@ try {
     databricks apps run-local -p $Profile `
         --env DATABRICKS_WAREHOUSE_ID=$warehouseId `
         --env LINEAGE_CACHE_REFRESH_JOB_ID=$lineageJobId `
+        --env PURPOSE_DRAFT_ENDPOINT=databricks-claude-3-7-sonnet `
         --env DATABRICKS_TOKEN=$token
 } finally {
     Pop-Location
