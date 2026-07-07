@@ -72,7 +72,7 @@ Two additional groups are managed by Terraform to minimise the governed tag ASSI
 
 ## Platform Access Audit dashboard
 
-`dashboards/access_audit.lvdash.json` queries `system.access.audit` and provides:
+`dashboards/access_audit.lvdash.json` is an AI/BI dashboard that queries `system.access.audit` and provides:
 
 - **KPI row** — PII table access events (7d), unique users (7d), failed auth events (7d), permission changes (30d)
 - **PII access by user** — bar chart showing who is accessing silver/gold data (7d)

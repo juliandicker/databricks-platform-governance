@@ -30,9 +30,11 @@ Two governance jobs enforce these conventions:
 
 **`platform-governance-daily`** — scheduled daily at 01:00 Europe/London, `pause_status: PAUSED` by default (suitable for demo environments — unpause in the Databricks UI when running live). Tasks:
 
-- **`apply_auto_ttl`** — sweeps all managed tables that have `_delete_at` and applies `ALTER TABLE ... DELETE ROWS 0 DAYS AFTER _delete_at`. Idempotent.
+- **`apply_auto_ttl`** — sweeps all managed tables that have `_delete_at` and applies Databricks' native Auto TTL predictive-optimization feature (`ALTER TABLE ... DELETE ROWS 0 DAYS AFTER _delete_at`) rather than a custom scheduled DELETE. Idempotent.
 - **`compute_freshness_metrics`** — queries `MAX(_updated_at)` per table and writes to `admin.shared.freshness_metrics`.
 - **`create_retention_compliance_view`** — rebuilds `admin.shared.retention_compliance`, which surfaces structural compliance (`insertion_status`, `freshness_status`, `retention_status`) and operational SLA compliance (`sla_status`) for every managed table. Non-compliant and stale tables sort to the top.
+- **`refresh_dashboard`** / **`refresh_access_audit_dashboard`** — refresh the Platform Data Governance and Access Audit dashboards.
+- **`refresh_lineage_cache`** — triggers the standalone `lineage_cache_refresh` job that keeps `admin.lineage_cache` current for the SAR app (see [`docs/sar-app.md`](sar-app.md#lineage-cache)).
 
 ```sql
 SELECT * FROM admin.shared.retention_compliance WHERE sla_status = 'STALE';

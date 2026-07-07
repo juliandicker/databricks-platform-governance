@@ -6,17 +6,11 @@ Databricks governed tag permissions cannot be configured via the REST API or Ter
 
 After each `terraform apply` that creates or recreates the metastore. If you destroy and redeploy (the normal cycle for this repo), the metastore is new and all tag permissions are reset — run this step again.
 
-Data Classification must already be enabled on silver and gold before the governed tags exist. That happens automatically via the CI `Enable Data Classification` step. Wait for the CI apply job to complete before starting here.
+Data Classification must already be enabled on silver and gold before the governed tags exist — check Catalog → Govern → Data Classification if you haven't confirmed it's on for this workspace.
 
 ## Steps
 
-1. In the Databricks workspace, click **Catalog** (left nav).
-2. Click the **Govern** button (shield icon) and select **Governed Tags**.
-3. Click the **Account Permissions** tab.
-4. Click **Grant permissions**.
-5. Type `sg-dbplat-governed-tags`, select it, check **Assign**, and confirm.
-
-That's it — one grant at account level applies `ASSIGN` across all governed tags.
+Grant `ASSIGN` to `sg-dbplat-governed-tags` via **Catalog → Govern → Governed Tags → Account Permissions → Grant permissions** — one grant at account level covers every governed tag.
 
 ![Governed Tags → Account Permissions tab, showing sg-dbplat-governed-tags granted Assign](governed_tags_account_permissions.png)
 

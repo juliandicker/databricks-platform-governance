@@ -2,7 +2,7 @@
 
 Unity Catalog governance for the [`simple-databricks-deployment`](https://github.com/juliandicker/simple-databricks-deployment) lakehouse: ABAC column-masking policies and their UDFs, GDPR audit tables (erasure, access requests, lineage cache), the SAR (Subject Access Request) Streamlit app, and the Databricks Asset Bundle (DABs) jobs/dashboards that maintain all of it.
 
-**This repo has no Terraform.** Everything here is DABs + SQL, deployed with `databricks bundle deploy` / `databricks bundle run`. This is deliberate: it's the **governance** half of a two-repo split, designed to be reusable unchanged on top of a future, differently-architected infra project (e.g. a VNet-injected one) — only the infra repo needs to change for that, not this one. The boundary holds because nothing here reads infra state directly: the two values it needs (`warehouse_id`, `platform_sp_id`) resolve by name against the live workspace at deploy time via DABs `lookup:` variables, so swapping the infra project underneath doesn't require touching a single file here.
+**This repo has no Terraform.** Everything here is DABs + SQL/Python, deployed with `databricks bundle deploy` / `databricks bundle run`. This is deliberate: it's the **governance** half of a two-repo split, designed to be reusable unchanged on top of a future, differently-architected infra project (e.g. a VNet-injected one) — only the infra repo needs to change for that, not this one. The boundary holds because nothing here reads infra state directly: the two values it needs (`warehouse_id`, `platform_sp_id`) resolve by name against the live workspace at deploy time via DABs `lookup:` variables, so swapping the infra project underneath doesn't require touching a single file here.
 
 ## Documentation
 
