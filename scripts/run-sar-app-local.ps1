@@ -100,7 +100,7 @@ try {
     databricks apps run-local -p $Profile `
         --env DATABRICKS_WAREHOUSE_ID=$warehouseId `
         --env LINEAGE_CACHE_REFRESH_JOB_ID=$lineageJobId `
-        --env PURPOSE_DRAFT_ENDPOINT=databricks-claude-3-7-sonnet `
+        --env PURPOSE_DRAFT_ENDPOINT=databricks-claude-haiku-4-5 `
         --env DATABRICKS_TOKEN=$token
 } finally {
     Pop-Location

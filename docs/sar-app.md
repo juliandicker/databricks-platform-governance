@@ -73,7 +73,7 @@ A row matching the subject's search identifiers can still carry a *different* su
 
 ### AI-drafted purpose
 
-The "Purpose of processing" field is required free text with no purpose/recipient registry in this platform to auto-derive it from — a genuine burden on the reviewer for a table they may not own. A "✨ Draft with AI" button above the field calls `databricks-claude-3-7-sonnet` (a Databricks Foundation Model API pay-per-token endpoint, granted `CAN_QUERY` to the app SP via a `serving_endpoint` resource in `resources/apps/sar.yml`, surfaced to the app as `PURPOSE_DRAFT_ENDPOINT`) to draft a short starting-point statement. The prompt (`access_report.draft_purpose`) is built strictly from schema-level facts already on screen for the reviewer's own redaction review — table names, table/column `COMMENT`s, matched governed tag, provenance, and only the columns currently checked `Include` — and never the disclosed rows themselves; see the reasoning in "Report format" below for why that boundary matters. The result only ever prefills the still-editable text box, exactly like Unity Catalog's own "Generate a comment" AI assist for column/table comments — the reviewer can edit it, regenerate it, or ignore it, and it's never submitted automatically.
+The "Purpose of processing" field is required free text with no purpose/recipient registry in this platform to auto-derive it from — a genuine burden on the reviewer for a table they may not own. A "✨ Draft with AI" button above the field calls `databricks-claude-haiku-4-5` (a Databricks Foundation Model API pay-per-token endpoint — Haiku is deliberately the cheapest tier here, since this is a short, simple, low-stakes drafting task that's always human-reviewed before use; granted `CAN_QUERY` to the app SP via a `serving_endpoint` resource in `resources/apps/sar.yml`, surfaced to the app as `PURPOSE_DRAFT_ENDPOINT`) to draft a short starting-point statement. The prompt (`access_report.draft_purpose`) is built strictly from schema-level facts already on screen for the reviewer's own redaction review — table names, table/column `COMMENT`s, matched governed tag, provenance, and only the columns currently checked `Include` — and never the disclosed rows themselves; see the reasoning in "Report format" below for why that boundary matters. The result only ever prefills the still-editable text box, exactly like Unity Catalog's own "Generate a comment" AI assist for column/table comments — the reviewer can edit it, regenerate it, or ignore it, and it's never submitted automatically.
 
 ### Report format — printable HTML, not JSON or a PDF library
 
@@ -139,7 +139,7 @@ pip install -r requirements.txt
 databricks auth login --host https://<workspace-host>   # one-time; interactive OAuth in a browser
 databricks apps run-local -p <profile> `
   --env DATABRICKS_WAREHOUSE_ID=<warehouse-id> `
-  --env PURPOSE_DRAFT_ENDPOINT=databricks-claude-3-7-sonnet `
+  --env PURPOSE_DRAFT_ENDPOINT=databricks-claude-haiku-4-5 `
   --env DATABRICKS_TOKEN=<token from `databricks auth token -p <profile>`>
 ```
 
@@ -147,7 +147,7 @@ A long-running `run-local` process keeps using the token it launched with — si
 
 Three things `run-local` doesn't resolve automatically outside a full bundle context:
 - `DATABRICKS_WAREHOUSE_ID` — `app.yaml`'s `valueFrom: 'sql-warehouse'` binding only resolves inside a deployed bundle, so pass it explicitly (find the ID via the SQL Warehouses page or `databricks warehouses list`; the platform one is named `data_platform_admins-sql-warehouse`).
-- `PURPOSE_DRAFT_ENDPOINT` — same `valueFrom` limitation, but unlike the warehouse ID this one isn't a per-workspace dynamic ID to look up: pass the same literal endpoint name as `resources/apps/sar.yml`'s `serving_endpoint.name` (`databricks-claude-3-7-sonnet`).
+- `PURPOSE_DRAFT_ENDPOINT` — same `valueFrom` limitation, but unlike the warehouse ID this one isn't a per-workspace dynamic ID to look up: pass the same literal endpoint name as `resources/apps/sar.yml`'s `serving_endpoint.name` (`databricks-claude-haiku-4-5`).
 - `DATABRICKS_TOKEN` — `app.py`'s `_get_token()` normally reads the `x-forwarded-access-token` header the real Databricks Apps proxy injects; locally there's no proxy, so it falls back to this env var. `get_service_principal_token()` (used for bronze search and for erasure/restore execution) also resolves via this token locally, meaning those code paths run as *your own identity* rather than the app's actual SP — fine for functional testing if you're in `data_platform_admins` (full privileges everywhere), but it doesn't exercise the SP's specific grant boundary. That's still best verified via a real CI deploy.
 
 If your local machine has a leftover token cache from an older CLI version, `databricks auth login` may fail with a cache-format error; set `DATABRICKS_AUTH_STORAGE=plaintext` before logging in to force file-based token storage instead.
