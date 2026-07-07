@@ -16,19 +16,17 @@
 -- Idempotent MERGE — safe to re-run at any window width.
 --
 -- The in-app "refresh lineage cache now" button (apps/sar_app/lineage.py:
--- refresh_lineage_cache) runs the equivalent MERGE logic directly via the
--- SQL connector rather than this file — Databricks Apps and Jobs deploy to
--- separate filesystems, so the app can't read this file at runtime. Keep
--- the two in sync if the cache tables' schema changes.
+-- trigger_lineage_cache_refresh) triggers this same job on demand rather
+-- than re-implementing its SQL — the MERGE logic lives in exactly one place.
 
 MERGE INTO admin.lineage_cache.table_lineage_current AS tgt
 USING (
   SELECT
     source_table_full_name,
     target_table_full_name,
-    source_table_catalog,
-    target_table_catalog,
-    COALESCE(entity_type, 'unknown') AS entity_type,
+    MAX_BY(source_table_catalog, event_time) AS source_table_catalog,
+    MAX_BY(target_table_catalog, event_time) AS target_table_catalog,
+    MAX_BY(COALESCE(entity_type, 'unknown'), event_time) AS entity_type,
     MAX(event_time) AS last_seen
   FROM system.access.table_lineage
   WHERE source_table_full_name IS NOT NULL
@@ -36,7 +34,7 @@ USING (
     AND source_table_full_name NOT RLIKE '_(drift|profile)_metrics$'
     AND target_table_full_name NOT RLIKE '_(drift|profile)_metrics$'
     AND event_date >= current_date() - CAST(:lineage_cache_lookback_days AS INT)
-  GROUP BY ALL
+  GROUP BY source_table_full_name, target_table_full_name
 ) AS src
 ON  tgt.source_table_full_name = src.source_table_full_name
 AND tgt.target_table_full_name = src.target_table_full_name
