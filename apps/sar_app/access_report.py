@@ -30,10 +30,12 @@ the erasure-feature design notes this mirrors):
 from __future__ import annotations
 
 import html
+import json
 import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 from databricks.sdk import WorkspaceClient
@@ -53,19 +55,33 @@ RIGHTS_BOILERPLATE = (
     "authority (Art. 77)."
 )
 
-#: Truthful only for what this platform actually models — no external
-#: processors are configured anywhere in this repo. Flagged in docs/sar-app.md
-#: as something to verify against real-world data flows outside this platform.
-RECIPIENTS_BOILERPLATE = (
-    "Your data is processed internally by the data platform team and the "
-    "data product team that owns each table listed below. This platform has "
-    "no external data recipients or processors configured."
+#: Shown only when the reviewer has selected no registered system for this
+#: disclosure — deliberately scoped to "registered", not a blanket "none
+#: exists" claim, since this reflects apps/sar_app/automated_decision_systems.json
+#: (organisation-maintained, may be incomplete) rather than something this
+#: platform can verify on its own.
+AUTOMATED_DECISION_NONE_TEXT = (
+    "No automated decision-making system registered as applicable to this "
+    "disclosure was identified. This reflects the organisation's registered "
+    "automated decision-making systems only."
 )
 
-AUTOMATED_DECISION_BOILERPLATE = (
-    "No automated decision-making producing legal or similarly significant "
-    "effects (Art. 22) has been identified for the tables in this report."
-)
+_ADM_SYSTEMS_PATH = Path(__file__).parent / "automated_decision_systems.json"
+
+
+def load_automated_decision_systems() -> list[dict]:
+    """Load the DPO-maintained Art. 22 register from ``automated_decision_systems.json``.
+
+    A JSON file rather than a database table so the DPO/compliance team can
+    add, remove, or reword entries directly via a PR — no code change, no
+    Databricks access needed. Matching a system to a given disclosure is a
+    deliberately manual, reviewer-driven choice (not auto-suggested by
+    schema/table) since getting this wrong in either direction — a missed
+    system, or a wrongly-attributed one — is a compliance-relevant mistake
+    a human should make, not the platform.
+    """
+    with open(_ADM_SYSTEMS_PATH, encoding="utf-8") as f:
+        return json.load(f)["systems"]
 
 
 @dataclass
@@ -169,6 +185,8 @@ def draft_purpose(targets: list[TableAccessTarget], comments: dict[str, dict]) -
     for target in targets:
         if not target.included_columns:
             continue
+        if lines:
+            lines.append("")  # blank line between tables — cheap disambiguation for multi-table prompts
         info = comments.get(target.full_name, {})
         lines.append(f"Table: {target.full_name} (found via {target.provenance} match on {target.matched_column_or_tag})")
         if info.get("table_comment"):
@@ -189,12 +207,44 @@ def draft_purpose(targets: list[TableAccessTarget], comments: dict[str, dict]) -
     prompt = (
         "You are drafting the \"purpose of processing\" statement for a GDPR "
         "Article 15 subject access report. Based only on the schema metadata "
-        "below (table names, descriptions, column names and descriptions) — "
+        "below (table names, descriptions, column names, column tags and descriptions) — "
         "not on any actual personal data, which you have not been given — "
-        "write a concise 1-3 sentence business purpose explaining why this "
-        "personal data is processed. Do not invent facts the metadata "
-        "doesn't support; if the metadata is too sparse to infer a purpose "
-        "confidently, say so plainly instead of guessing.\n\n" + "\n".join(lines)
+        "write the business purpose explaining why this personal data is "
+        "processed, for the data subject to read.\n\n"
+        "Rules:\n"
+        "- Write for the data subject reading this: never mention table "
+        "names, schema/catalog names, or tag identifiers (e.g. "
+        "class.full_name) — describe the business purpose only, in plain "
+        "language.\n"
+        "- Do not invent facts the metadata doesn't support. Only say the "
+        "purpose cannot be determined if a table has no description and no "
+        "column comments beyond bare column/tag names — otherwise give a "
+        "confident best-effort purpose from what's present, without hedging "
+        "words like \"it appears\" or \"possibly\".\n"
+        "- Default to one short paragraph (1-3 sentences). Only switch to a "
+        "plain \"- \" bulleted list (one purpose per line) if the tables "
+        "serve clearly distinct, non-overlapping business functions (e.g. "
+        "billing vs. marketing) — if purposes overlap or reinforce each "
+        "other, merge them into the paragraph.\n"
+        "- Use a formal, neutral register appropriate for a legal disclosure "
+        "to a data subject (e.g. \"This data is processed to...\", not "
+        "casual phrasing).\n"
+        "- Use no markdown or HTML syntax that needs rendering to make "
+        "sense — no headers, bold, italics, links, or code formatting — "
+        "since this text goes verbatim into a plain text box.\n"
+        "- Output only the purpose statement itself — no preamble, heading, "
+        "or commentary before or after it.\n\n"
+        "Example (one overlapping purpose, paragraph):\n"
+        "This data is processed to provide and administer your travel "
+        "bookings, including managing reservations, processing payments, "
+        "and verifying your identity and age where required by law.\n\n"
+        "Example (distinct purposes, list):\n"
+        "- Processing your travel bookings and payments.\n"
+        "- Sending you marketing communications about offers you have "
+        "opted into.\n"
+        "- Investigating and responding to customer support enquiries you "
+        "have raised.\n\n"
+        "Schema metadata:\n" + "\n".join(lines)
     )
 
     endpoint = os.environ["PURPOSE_DRAFT_ENDPOINT"]
@@ -258,24 +308,51 @@ def build_report(
     subject_display: str,
     requested_by: str,
     purpose: str,
+    recipients: str,
     generated_at: datetime,
     targets: list[TableAccessTarget],
     retention_df: pd.DataFrame,
     comments: dict[str, dict],
+    adm_selections: list[dict],
 ) -> str:
     """Assemble the final self-contained HTML disclosure document.
 
     A single string with inline CSS and no external resources — the
-    reviewer can download it and open it standalone in a browser, or view
-    it in-app via the print-ready preview (app.py: _render_print_view),
-    which embeds this HTML in an iframe over Streamlit's own (dark) theme —
-    hence the explicit ``background: #fff`` below rather than relying on a
-    browser's default page background. Either way, use Print -> Save as PDF
-    for a handoff-ready document. Redacted columns are dropped entirely from
-    the per-table tables (Art. 15(4) is about *not disclosing* another
+    reviewer downloads it and can open it standalone in a browser and use
+    Print -> Save as PDF. Redacted columns are dropped entirely from the
+    per-table tables (Art. 15(4) is about *not disclosing* another
     person's data, not about showing a masked placeholder).
+
+    *recipients* is required reviewer-entered free text (like *purpose*),
+    not a platform-derived value — there's no reliable way for this
+    platform to enumerate an organisation's actual third parties (reinsurers,
+    outsourced claims administrators, cloud vendors, etc.), and guessing
+    wrong here is worse than requiring the reviewer to know the answer,
+    the same reasoning that keeps *purpose* free text rather than derived.
+
+    *adm_selections* is the reviewer-confirmed subset of
+    ``load_automated_decision_systems()`` that applies to this disclosure —
+    never auto-matched from the tables/schemas involved, since a wrong
+    system attribution (missed or spurious) is a compliance-relevant
+    mistake a human should make deliberately, not one the platform guesses
+    at. Each selected system's own ``statement``/``safeguards_text`` is
+    used verbatim; an empty list renders ``AUTOMATED_DECISION_NONE_TEXT``.
     """
-    categories = sorted({t.matched_column_or_tag for t in targets if t.matched_column_or_tag})
+    categories = sorted({
+        t.column_tags[col]
+        for t in targets
+        for col in t.included_columns
+        if col in t.column_tags
+    })
+
+    if adm_selections:
+        adm_html = "".join(
+            f"<p><strong>{_esc(system['system_name'])}:</strong> {_esc(system['statement'])} "
+            f"{_esc(system['safeguards_text'])}</p>"
+            for system in adm_selections
+        )
+    else:
+        adm_html = f"<p>{AUTOMATED_DECISION_NONE_TEXT}</p>"
 
     table_sections = []
     for target in targets:
@@ -367,10 +444,10 @@ def build_report(
   <p>{_esc(', '.join(categories)) if categories else 'See per-table sections below.'}</p>
 
   <h2>Recipients</h2>
-  <p>{RECIPIENTS_BOILERPLATE}</p>
+  <p>{_esc(recipients)}</p>
 
   <h2>Automated decision-making</h2>
-  <p>{AUTOMATED_DECISION_BOILERPLATE}</p>
+  {adm_html}
 
   <h2>Your data</h2>
   {''.join(table_sections)}
@@ -379,18 +456,6 @@ def build_report(
   <p>{RIGHTS_BOILERPLATE}</p>
 </body>
 </html>"""
-
-
-def estimate_print_height(targets: list[TableAccessTarget]) -> int:
-    """Rough pixel height for embedding ``build_report``'s output via ``components.html``.
-
-    A fixed-height iframe that's too short silently clips content instead of
-    scaling to fit the printed page — for a GDPR disclosure document that's a
-    correctness bug, not a cosmetic one, so this deliberately over-estimates
-    (a bit of trailing blank space costs at most one extra printed page).
-    """
-    total_rows = sum(len(t.rows) for t in targets)
-    return min(20000, 700 + len(targets) * 150 + total_rows * 34)
 
 
 def write_access_request(

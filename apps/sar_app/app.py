@@ -36,10 +36,10 @@ from access_report import (
     TableAccessTarget,
     build_report,
     draft_purpose,
-    estimate_print_height,
     get_all_tagged_columns,
     get_retention_info,
     get_table_comments,
+    load_automated_decision_systems,
     write_access_request,
 )
 from database import DatabricksClient, get_service_principal_token, get_tagged_columns
@@ -659,40 +659,6 @@ def _render_confirm_dialog() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Print-ready preview of the last generated access report
-# ---------------------------------------------------------------------------
-
-def _render_print_view() -> None:
-    """Full-page, chrome-free view of the last access report for Print -> Save as PDF.
-
-    Renders the report via components.html (a real iframe) rather than
-    st.markdown — st.markdown injects the report's <style> into the same
-    document as Streamlit's own theme CSS, which wins on text color and
-    produces illegible mixed-contrast output (verified: table headers render
-    as white-on-near-white). An iframe gives the report's CSS its own
-    document instead. Called from a st.stop()-guarded branch at the top of
-    the script, same pattern as the Review Erasure/Access Requests pages.
-    """
-    request_id, html_report, print_height = st.session_state.sar_access_last_result
-    st.markdown(
-        """<style>
-        [data-testid="stSidebar"] { display: none !important; }
-        [data-testid="stSidebarCollapsedControl"] { display: none !important; }
-        header[data-testid="stHeader"] { display: none !important; }
-        #MainMenu { display: none !important; }
-        footer { display: none !important; }
-        @media print { .stButton { display: none !important; } }
-        </style>""",
-        unsafe_allow_html=True,
-    )
-    if st.button("← Back to app"):
-        st.session_state.sar_print_view = False
-        st.rerun()
-    st.caption(f"Access report `{request_id}` — use your browser's Print → Save as PDF.")
-    components.html(html_report, height=print_height, scrolling=False)
-
-
-# ---------------------------------------------------------------------------
 # Access report dialog (GDPR Art. 15)
 # ---------------------------------------------------------------------------
 
@@ -719,32 +685,31 @@ def _render_access_report_dialog() -> None:
             if comment_info.get("table_comment"):
                 st.caption(f"Table description: {comment_info['table_comment']}")
 
-            # A "Select all" checkbox forces a fresh st.data_editor instance
-            # (via the bumped generation counter folded into its key) rather
-            # than trying to mutate the widget's own tracked edit-state
-            # directly — st.data_editor only respects the DataFrame passed
-            # to it for a key it hasn't seen before, so bulk-setting every
-            # row requires giving it a new key. The callback uses default
-            # arguments to snapshot this iteration's full_name/keys — a
-            # plain closure over the loop variable would have every table's
-            # checkbox reference whichever table the loop last visited.
-            gen_key = f"access_cols_gen_{search_id}_{full_name}"
+            # The reviewer's actual Include state is held in a durable
+            # per-column dict in session_state, not recomputed from
+            # rt["default_include"] on every rerun — a prior one-shot
+            # "force" flag consumed by the very next rerun only worked if
+            # nothing else on the page triggered a rerun in between (e.g.
+            # typing in the Purpose field below), at which point it fell
+            # back to the defaults and st.data_editor resynced to that
+            # stale data under its unchanged key, silently discarding
+            # "Select all". Keeping this dict as the one source of truth,
+            # and always feeding st.data_editor's own last-returned values
+            # back into it below, means the checklist_df passed in on any
+            # given rerun always matches what the widget already shows.
             select_all_key = f"access_select_all_{search_id}_{full_name}"
-            st.session_state.setdefault(gen_key, 0)
+            include_state_key = f"access_include_state_{search_id}_{full_name}"
+            st.session_state.setdefault(include_state_key, dict(rt["default_include"]))
 
-            def _toggle_all(full_name=full_name, select_all_key=select_all_key, gen_key=gen_key) -> None:
-                st.session_state[f"access_cols_force_{search_id}_{full_name}"] = st.session_state[select_all_key]
-                st.session_state[gen_key] += 1
+            def _toggle_all(select_all_key=select_all_key, include_state_key=include_state_key, rt=rt) -> None:
+                value = st.session_state[select_all_key]
+                st.session_state[include_state_key] = {c: value for c in rt["all_columns"]}
 
-            force_value = st.session_state.pop(f"access_cols_force_{search_id}_{full_name}", None)
-            include_values = (
-                [force_value] * len(rt["all_columns"]) if force_value is not None
-                else [rt["default_include"][c] for c in rt["all_columns"]]
-            )
+            include_state = st.session_state[include_state_key]
             checklist_df = pd.DataFrame({
                 "Column": rt["all_columns"],
                 "Tag": [rt["tag_by_col"].get(c, "—") for c in rt["all_columns"]],
-                "Include": include_values,
+                "Include": [include_state[c] for c in rt["all_columns"]],
             })
 
             # header_placeholder reserves a row above the table for the
@@ -754,7 +719,7 @@ def _render_access_report_dialog() -> None:
             header_placeholder = st.empty()
             edited = st.data_editor(
                 checklist_df,
-                key=f"access_cols_{search_id}_{full_name}_{st.session_state[gen_key]}",
+                key=f"access_cols_{search_id}_{full_name}",
                 hide_index=True,
                 use_container_width=True,
                 disabled=["Column", "Tag"],
@@ -766,6 +731,7 @@ def _render_access_report_dialog() -> None:
                     )
                 },
             )
+            st.session_state[include_state_key] = dict(zip(edited["Column"], edited["Include"]))
 
             # One widget with the count folded into its own label, rather
             # than a separate caption in an adjacent column — two widgets
@@ -808,29 +774,92 @@ def _render_access_report_dialog() -> None:
                 column_tags=rt["tag_by_col"],
             ))
 
+    purpose_label = "Purpose of processing (required — included in the report, not stored in the audit trail)"
     purpose_key = f"access_purpose_{search_id}"
     purpose_control_key = f"access_purpose_header_{search_id}".replace(".", "_")
+
+    # A real st.text_area label can't have a widget placed beside it directly,
+    # so the label is rendered here as plain markdown (matching Streamlit's
+    # own label size/color) alongside the button, and the widget's built-in
+    # label is hidden below to avoid showing it twice. Tight button padding
+    # + vertical_alignment="center" is what keeps the button's height and
+    # baseline lined up with the label text instead of towering over it.
     st.markdown(
-        f'<style>.st-key-{purpose_control_key} {{ display: flex; flex-direction: column; align-items: flex-end; }}</style>',
+        f'<style>.st-key-{purpose_control_key} {{ display: flex; flex-direction: column; '
+        f'align-items: flex-end; }}'
+        f'.st-key-{purpose_control_key} button {{ padding: 0.1rem 0.5rem; min-height: 0; '
+        f'font-size: 0.8rem; }}</style>',
         unsafe_allow_html=True,
     )
-    with st.container(key=purpose_control_key):
-        if st.button(
-            "✨ Draft with AI",
-            key=f"access_purpose_draft_{search_id}",
-            help="Drafts from table/column names and descriptions only — never the "
-            "disclosed data itself. Always review before generating the report.",
-        ):
-            with st.spinner("Drafting purpose with AI..."):
-                try:
-                    st.session_state[purpose_key] = draft_purpose(targets, comments)
-                except Exception as e:
-                    st.error(f"Couldn't draft a purpose: {e}")
+    label_col, button_col = st.columns([0.75, 0.25], vertical_alignment="center")
+    with label_col:
+        st.markdown(
+            f'<p style="font-size: 0.875rem; margin: 0;">{purpose_label}</p>',
+            unsafe_allow_html=True,
+        )
+    with button_col:
+        with st.container(key=purpose_control_key):
+            if st.button(
+                "✨ Draft with AI",
+                key=f"access_purpose_draft_{search_id}",
+                help="Drafts from table/column names and descriptions only — never the "
+                "disclosed data itself. Always review before generating the report.",
+            ):
+                with st.spinner("Drafting purpose with AI..."):
+                    try:
+                        st.session_state[purpose_key] = draft_purpose(targets, comments)
+                    except Exception as e:
+                        st.error(f"Couldn't draft a purpose: {e}")
 
     purpose = st.text_area(
-        "Purpose of processing (required — included in the report, not stored in the audit trail)",
+        purpose_label,
         placeholder="e.g. Providing and administering travel booking services for the data subject.",
         key=purpose_key,
+        label_visibility="collapsed",
+    )
+
+    # Free text, not platform-derived — there's no reliable way for this
+    # platform to enumerate an organisation's actual third parties
+    # (reinsurers, outsourced processors, cloud vendors, etc.); see
+    # access_report.build_report's docstring for the same reasoning that
+    # keeps this a required reviewer answer rather than a guessed default.
+    recipients_key = f"access_recipients_{search_id}"
+    recipients = st.text_area(
+        "Recipients (required — who this data is shared with, and why)",
+        placeholder="e.g. Shared with our claims administrator to assess and settle claims, "
+        "and with our reinsurer under a reinsurance treaty. No international transfers.",
+        key=recipients_key,
+    )
+
+    # Never auto-matched from the disclosed tables/schemas — see
+    # access_report.load_automated_decision_systems's docstring for why this
+    # stays a deliberate, reviewer-driven selection. A required explicit
+    # "none apply" confirmation exists alongside the multiselect so an
+    # unanswered section reads as unanswered, not as a silent "none" default
+    # — the exact bug (an unverified blanket "none identified" claim) this
+    # whole feature replaced.
+    adm_systems = load_automated_decision_systems()
+    adm_none_key = f"access_adm_none_{search_id}"
+    adm_unsure_key = f"access_adm_unsure_{search_id}"
+    st.markdown("**Automated decision-making (GDPR Art. 22)** — required")
+    st.caption(
+        "Select any systems from the organisation's registered list "
+        "(`apps/sar_app/automated_decision_systems.json`, DPO-maintained) that "
+        "use this subject's data."
+    )
+    selected_names = st.multiselect(
+        "Registered automated decision-making systems",
+        options=[s["system_name"] for s in adm_systems],
+        key=f"access_adm_systems_{search_id}",
+        label_visibility="collapsed",
+    )
+    none_confirmed = st.checkbox(
+        "I've checked — no registered system applies to this disclosure",
+        key=adm_none_key,
+    )
+    unsure = st.checkbox(
+        "Unsure — escalate to DPO before releasing this report",
+        key=adm_unsure_key,
     )
 
     col1, col2 = st.columns(2)
@@ -851,6 +880,28 @@ def _render_access_report_dialog() -> None:
             if not purpose.strip():
                 st.error("Purpose of processing is required.")
                 return
+            if not recipients.strip():
+                st.error("Recipients is required.")
+                return
+            if unsure:
+                st.error(
+                    "This report can't be released until the DPO confirms whether an "
+                    "automated decision-making system applies — escalate to the DPO, "
+                    "then regenerate once resolved."
+                )
+                return
+            if selected_names and none_confirmed:
+                st.error(
+                    "You've selected a system and also confirmed none apply — "
+                    "resolve this contradiction before generating the report."
+                )
+                return
+            if not selected_names and not none_confirmed:
+                st.error(
+                    "Automated decision-making is required: select any systems that "
+                    "apply, confirm none apply, or mark this unsure."
+                )
+                return
             _touch_watchdog()
             sp_token = get_service_principal_token()
             exec_client = DatabricksClient(sp_token)
@@ -867,16 +918,16 @@ def _render_access_report_dialog() -> None:
                         subject_display=st.session_state.get("sar_subject_name", ""),
                         requested_by=_get_requester_identity(),
                         purpose=purpose.strip(),
+                        recipients=recipients.strip(),
                         generated_at=datetime.now(timezone.utc),
                         targets=targets,
                         retention_df=retention_df,
                         comments=comments,
+                        adm_selections=[s for s in adm_systems if s["system_name"] in selected_names],
                     )
             finally:
                 exec_client.close()
-            st.session_state.sar_access_last_result = (
-                request_id, html_report, estimate_print_height(targets)
-            )
+            st.session_state.sar_access_last_result = (request_id, html_report)
             for key in ("sar_access_review_tables", "sar_access_retention_df", "sar_access_comments"):
                 st.session_state.pop(key, None)
             st.rerun()
@@ -922,10 +973,6 @@ st.markdown(
     </style>""",
     unsafe_allow_html=True,
 )
-
-if st.session_state.get("sar_print_view") and "sar_access_last_result" in st.session_state:
-    _render_print_view()
-    st.stop()
 
 # A sidebar option_menu rather than st.navigation/st.Page — this keeps each
 # extra page a minimal, isolated addition (call the new module, st.stop())
@@ -1408,20 +1455,17 @@ if "sar_last_result" in st.session_state:
 # ---------------------------------------------------------------------------
 
 if "sar_access_last_result" in st.session_state:
-    request_id, html_report, print_height = st.session_state.sar_access_last_result
+    request_id, html_report = st.session_state.sar_access_last_result
     st.divider()
     st.subheader("Access Report Result")
     st.success(f"Access report `{request_id}` generated — recorded in `admin.access`.")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Print-ready preview", use_container_width=True):
-            st.session_state.sar_print_view = True
-            st.rerun()
-    with col2:
-        st.download_button(
-            "Download report (.html)",
-            data=html_report,
-            file_name=f"access-report-{request_id}.html",
-            mime="text/html",
-            use_container_width=True,
-        )
+    st.caption(
+        "Open the downloaded file in a browser tab and use Print → Save as PDF "
+        "for a handoff-ready document."
+    )
+    st.download_button(
+        "Download report (.html)",
+        data=html_report,
+        file_name=f"access-report-{request_id}.html",
+        mime="text/html",
+    )
