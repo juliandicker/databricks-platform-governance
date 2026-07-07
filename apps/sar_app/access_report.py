@@ -365,9 +365,14 @@ def build_report(
     })
 
     if adm_selections:
+        # Split into a heading (matches the per-table <h3> pattern below),
+        # the factual statement, and a lighter secondary note for the
+        # subject's rights — one run-on <p> read poorly once system names
+        # grew long enough to carry bracketed cross-industry examples.
         adm_html = "".join(
-            f"<p><strong>{_esc(system['system_name'])}:</strong> {_esc(system['statement'])} "
-            f"{_esc(system['safeguards_text'])}</p>"
+            f"<h3>{_esc(system['system_name'])}</h3>"
+            f"<p>{_esc(system['statement'])}</p>"
+            f"<p class='comment-note'>{_esc(system['safeguards_text'])}</p>"
             for system in adm_selections
         )
     else:

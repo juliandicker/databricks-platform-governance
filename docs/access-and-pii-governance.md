@@ -36,7 +36,9 @@ Silver and gold carry Unity Catalog column mask policies driven by Databricks Da
 | `mask_location` | `SW1A` (UK postcode outward code) or `[REDACTED]` |
 | `mask_sensitive` | `[REDACTED]` |
 
-9 policies per catalog cover all 25 GDPR + PCI DSS `class.*` tags explicitly. Databricks does not support namespace wildcards in policy conditions, so each tag is listed in exactly one policy. All policies are managed by the DABs governance job and are idempotent.
+8 policies per catalog cover all 18 GDPR + PCI DSS `class.*` tags explicitly — Databricks does not support namespace wildcards in policy conditions, so each tag is listed in exactly one policy's `MATCH COLUMNS` condition.
+
+**A rename here needs care.** `CREATE OR REPLACE POLICY` only replaces a policy under its exact current name — an old name from a prior rename keeps silently existing in Unity Catalog with whatever exempt list it had at the time, and `DROP POLICY` doesn't support `IF EXISTS`, so cleanup can't be folded into the idempotent deploy job. This bit the platform for real: a 2026-06-29 rename of `mask_name_columns` into `mask_sensitive_columns` left the old policy active on gold with a stale exempt list that never included the SAR app's service principal — every erasure dry-run against gold silently failed with a 0-row mismatch until it was diagnosed and the orphaned policy manually dropped on 2026-07-06.
 
 The same query against `silver.tfl.customer_journeys`, masked vs. unmasked:
 

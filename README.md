@@ -2,25 +2,13 @@
 
 Unity Catalog governance for the [`simple-databricks-deployment`](https://github.com/juliandicker/simple-databricks-deployment) lakehouse: ABAC column-masking policies and their UDFs, GDPR audit tables (erasure, access requests, lineage cache), the SAR (Subject Access Request) Streamlit app, and the Databricks Asset Bundle (DABs) jobs/dashboards that maintain all of it.
 
-**This repo has no Terraform.** Everything here is DABs + SQL, deployed with `databricks bundle deploy` / `databricks bundle run`. This is deliberate: it's the **governance** half of a two-repo split, designed to be reusable unchanged on top of a future, differently-architected infra project (e.g. a VNet-injected one) — only the infra repo needs to change for that, not this one.
-
-## Features
-
-| Feature | What it does | Docs |
-|---|---|---|
-| ABAC column masking | Masks governed-tagged columns (PII, financial identifiers, etc.) in silver and gold for standard readers; data stewards, PII readers, and team SPs see raw data | [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) |
-| GDPR erasure (Article 17) | Search a subject across bronze/silver/gold, review matches, and execute an all-or-nothing delete — with time-travel restore while the VACUUM retention window holds | [`docs/sar-app.md`](docs/sar-app.md) |
-| GDPR access reports (Article 15) | Search, review per-table/per-column disclosure, and generate a subject access report | [`docs/sar-app.md`](docs/sar-app.md) |
-| Lineage-aware search | Traces upstream/downstream table lineage from a materialized "latest edge" cache, refreshed on a schedule or on demand, so search scales with account-wide lineage history | [`docs/sar-app.md`](docs/sar-app.md) |
-| Data lifecycle governance | Platform metadata columns, freshness SLAs, Auto TTL/retention, the retention-compliance view | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md) |
-| Governance dashboards | Platform Data Governance (freshness/retention compliance) and Access Audit dashboards | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md), [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) |
-| Governed tag grants | Manual account-level `ASSIGN` grant procedure (not API-manageable) | [`docs/governed-tag-grants.md`](docs/governed-tag-grants.md) |
+**This repo has no Terraform.** Everything here is DABs + SQL, deployed with `databricks bundle deploy` / `databricks bundle run`. This is deliberate: it's the **governance** half of a two-repo split, designed to be reusable unchanged on top of a future, differently-architected infra project (e.g. a VNet-injected one) — only the infra repo needs to change for that, not this one. The boundary holds because nothing here reads infra state directly: the two values it needs (`warehouse_id`, `platform_sp_id`) resolve by name against the live workspace at deploy time via DABs `lookup:` variables, so swapping the infra project underneath doesn't require touching a single file here.
 
 ## Documentation
 
 | Doc | Covers |
 |---|---|
-| [`docs/sar-app.md`](docs/sar-app.md) | The SAR app end to end: search, GDPR erasure and access reports, lineage cache, local dev |
+| [`docs/sar-app.md`](docs/sar-app.md) | The SAR Streamlit app end to end: lineage-aware search across bronze/silver/gold, GDPR erasure (Article 17, with time-travel restore) and access reports (Article 15), local dev |
 | [`docs/access-and-pii-governance.md`](docs/access-and-pii-governance.md) | Catalog grants, ABAC column masking, governed tags, Entra groups/AIM, Access Audit dashboard |
 | [`docs/data-lifecycle-governance.md`](docs/data-lifecycle-governance.md) | Platform metadata columns, freshness SLAs, Auto TTL/retention, governance jobs, Data Governance dashboard |
 | [`docs/governed-tag-grants.md`](docs/governed-tag-grants.md) | Manual governed-tag `ASSIGN` grant procedure |
@@ -49,7 +37,7 @@ Nothing in the infra repo ever triggers a deploy here — its GitHub App is scop
 | `resources/apps/sar.yml`, `apps/sar_app/` | The SAR Streamlit app |
 | `resources/dashboards/*.yml`, `dashboards/*.lvdash.json` | Platform Data Governance and Access Audit dashboards |
 | `docs/` | See "Documentation" above |
-| `scripts/run-sar-app-local.ps1` | Runs the SAR app locally against the real deployed workspace — see "Local development" below |
+| `scripts/` | Local-dev helper scripts — see [`docs/sar-app.md`](docs/sar-app.md) |
 
 ## Naming contract with the infra repo
 
@@ -67,16 +55,6 @@ If any of these names change on the infra side, the corresponding references her
 - **Governed tag `ASSIGN` grants aren't API-manageable** (Databricks provider/REST limitation) — apply manually via Catalog → Govern → Governed Tags → Account Permissions after every fresh deploy. See [`docs/governed-tag-grants.md`](docs/governed-tag-grants.md).
 - **Policy renames need a manual `DROP POLICY`** — `CREATE OR REPLACE POLICY` only replaces a policy under its exact current name; an old name from a prior rename keeps silently existing with its stale exempt list, and `DROP POLICY` doesn't support `IF EXISTS` so this can't be folded into the idempotent job.
 - **The SAR app gets a new service principal** whenever it's deleted and redeployed (a fresh workspace, or a `bundle deploy` that doesn't recognize a pre-existing app object under its deployment state) — the infra repo's `var.sar_app_sp_id` needs updating after that, to restore the app's bronze/silver/gold grants and `sg-dbplat-data-product-sps` membership.
-
-## Local development
-
-Requires Databricks CLI ≥ 0.250.0 and a one-time `databricks auth login --host <workspace-host> -p <profile>`. Then:
-
-```powershell
-.\scripts\run-sar-app-local.ps1
-```
-
-This runs the app against the real deployed workspace (not a mock) via `databricks apps run-local` — resolving the platform SQL warehouse ID and the lineage-cache-refresh job ID by name lookup (no Terraform involved), starting the warehouse if it's stopped, and fetching a fresh OAuth token. See [`docs/sar-app.md`](docs/sar-app.md)'s "Local development" section for the full walkthrough and troubleshooting.
 
 ## Deploying manually
 
