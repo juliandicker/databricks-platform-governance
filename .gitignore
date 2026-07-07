@@ -4,3 +4,6 @@ __pycache__/
 
 # Databricks CLI local bundle/auth cache
 .databricks/
+
+# Editor
+.vscode/
