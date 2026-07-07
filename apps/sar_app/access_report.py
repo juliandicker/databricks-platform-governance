@@ -84,6 +84,25 @@ def load_automated_decision_systems() -> list[dict]:
         return json.load(f)["systems"]
 
 
+_RECIPIENT_TEMPLATES_PATH = Path(__file__).parent / "recipient_templates.json"
+
+
+def load_recipient_templates() -> list[dict]:
+    """Load phrasing templates for the Recipients field from ``recipient_templates.json``.
+
+    Unlike the automated-decision-making register, this is a drafting aid
+    only, not a compliance gate — Recipients stays required free text (see
+    ``build_report``'s docstring for why), and a template is just inserted
+    text the reviewer edits and fills the ``[blanks]`` in themselves,
+    exactly like typing it from scratch but with consistent grammar/tone/
+    legal phrasing across reports. A JSON file so any organisation adopting
+    this app can add, remove, or reword templates via a PR with no code
+    change.
+    """
+    with open(_RECIPIENT_TEMPLATES_PATH, encoding="utf-8") as f:
+        return json.load(f)["templates"]
+
+
 @dataclass
 class TableAccessTarget:
     """One matched table's worth of reviewer-confirmed disclosure scope."""

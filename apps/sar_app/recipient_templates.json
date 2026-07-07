@@ -1,0 +1,57 @@
+{
+  "_comment": "Reusable phrasing templates for the Recipients field in the Art. 15 access report. Purely a drafting aid — selecting one inserts its text into the still-editable Recipients box; nothing here is submitted automatically. Edit this file directly (via PR) to add, remove, or reword templates for your organisation — no code change needed. Bracketed [blanks] are placeholders the reviewer fills in with the actual recipient name and detail; this file makes no claim about who your organisation actually shares data with.",
+  "templates": [
+    {
+      "label": "Internal only — no external recipients",
+      "template": "This data is processed internally within our organisation only. It is not shared with any external third party."
+    },
+    {
+      "label": "Service provider / processor (generic)",
+      "template": "We share this data with [recipient name], who process it on our behalf under a data processing agreement, for the purpose of [reason, e.g. hosting our systems, providing customer support]."
+    },
+    {
+      "label": "Professional advisor (generic)",
+      "template": "We may share this data with our professional advisors, such as [recipient name, e.g. our auditors or legal counsel], where necessary for [reason]."
+    },
+    {
+      "label": "Regulator / statutory body (generic)",
+      "template": "We may disclose this data to [regulator name, e.g. the Financial Conduct Authority] where required by law or regulatory obligation."
+    },
+    {
+      "label": "Group company (generic)",
+      "template": "This data may be shared with other companies within the [group name] group, for the purpose of [reason]."
+    },
+    {
+      "label": "International transfer add-on (generic)",
+      "template": "[Recipient name] is located outside the UK/EEA. Your data is protected by [adequacy decision / Standard Contractual Clauses / other safeguard]."
+    },
+    {
+      "label": "Reinsurer (insurance)",
+      "template": "For certain policies, we share information about your policy and claims history with [reinsurer name], who share the risk of your policy with us under a reinsurance treaty."
+    },
+    {
+      "label": "Third-party claims administrator / loss adjuster (insurance)",
+      "template": "When you make a claim, [TPA/loss adjuster name] may access your claim details, and where relevant your policy and contact information, to investigate, assess, and help settle your claim on our behalf."
+    },
+    {
+      "label": "Fraud prevention database (insurance)",
+      "template": "We share information with [fraud prevention database name] to prevent fraud and money laundering. If false or inaccurate information is provided and fraud is identified, details may be recorded and shared with other organisations."
+    },
+    {
+      "label": "Credit reference / identity verification agency (insurance)",
+      "template": "We may share information with [credit reference/identity verification agency name] to verify your identity and, where relevant to affordability or pricing, to assess your financial history."
+    },
+    {
+      "label": "Broker / intermediary (insurance)",
+      "template": "If you purchased your policy through [broker/intermediary name], they may receive information from us to service your policy, renewals, and any claims."
+    },
+    {
+      "label": "Debt collection agency (generic)",
+      "template": "Where a payment remains unpaid, we may share your details with [debt collection agency name] to recover the outstanding amount."
+    },
+    {
+      "label": "Medical assessor (insurance / health claims)",
+      "template": "For claims involving injury or health information, [medical assessment provider name] may review medical evidence on our behalf to assess your claim."
+    }
+  ]
+}

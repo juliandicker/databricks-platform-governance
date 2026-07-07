@@ -19,6 +19,7 @@ instead of re-querying Databricks.
 
 from __future__ import annotations
 
+import base64
 import os
 import time
 import uuid
@@ -28,6 +29,7 @@ from datetime import date, datetime, timezone
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from databricks.sdk import WorkspaceClient
 from streamlit_option_menu import option_menu
 
 import access_review
@@ -40,6 +42,7 @@ from access_report import (
     get_retention_info,
     get_table_comments,
     load_automated_decision_systems,
+    load_recipient_templates,
     write_access_request,
 )
 from database import DatabricksClient, get_service_principal_token, get_tagged_columns
@@ -126,12 +129,30 @@ def _get_token() -> str:
 
 
 def _get_requester_identity() -> str:
-    """Best-effort identity of the calling user, for the erasure audit trail."""
-    return (
+    """Best-effort identity of the calling user, for the erasure audit trail.
+
+    A deployed app's reverse proxy always injects x-forwarded-email, so
+    that's checked first. Under local ``apps run-local`` there's no proxy
+    at all (see ``_get_token``), so the headers are never present there —
+    falling back to the Databricks SDK's own current-user lookup recovers
+    a real identity for local testing instead of always showing "unknown",
+    without any risk of misattributing a real deployed request: the
+    fallback only ever reflects whatever identity is already authenticating
+    this process (the caller's own token locally, the app's own SP if this
+    branch is ever hit in production, which would itself be an anomaly
+    worth noticing rather than a silent "unknown").
+    """
+    email = (
         st.context.headers.get("x-forwarded-email")
         or st.context.headers.get("x-forwarded-user")
-        or "unknown"
     )
+    if email:
+        return email
+    try:
+        me = WorkspaceClient().current_user.me()
+        return me.user_name or me.display_name or "unknown"
+    except Exception:
+        return "unknown"
 
 
 def _build_lineage_plan(
@@ -823,12 +844,38 @@ def _render_access_report_dialog() -> None:
     # (reinsurers, outsourced processors, cloud vendors, etc.); see
     # access_report.build_report's docstring for the same reasoning that
     # keeps this a required reviewer answer rather than a guessed default.
+    # The template picker below is a pure drafting aid for grammar/tone/
+    # legal-phrasing consistency — inserted text still has [blanks] the
+    # reviewer must fill in themselves, same spirit as AI-drafted purpose
+    # but with no model call, since these are static, pre-written strings.
+    recipients_label = "Recipients (required — who this data is shared with, and why)"
     recipients_key = f"access_recipients_{search_id}"
+    recipient_templates = load_recipient_templates()
+    st.markdown(
+        f'<p style="font-size: 0.875rem; margin: 0 0 0.25rem;">{recipients_label}</p>',
+        unsafe_allow_html=True,
+    )
+    template_col, insert_col = st.columns([0.75, 0.25])
+    with template_col:
+        template_choice = st.selectbox(
+            "Insert a template",
+            options=["— Insert a template —"] + [t["label"] for t in recipient_templates],
+            key=f"access_recipients_template_{search_id}",
+            label_visibility="collapsed",
+        )
+    with insert_col:
+        if st.button("Insert template", key=f"access_recipients_insert_{search_id}", use_container_width=True):
+            chosen = next((t for t in recipient_templates if t["label"] == template_choice), None)
+            if chosen:
+                current = st.session_state.get(recipients_key, "").strip()
+                st.session_state[recipients_key] = (current + "\n\n" if current else "") + chosen["template"]
+
     recipients = st.text_area(
-        "Recipients (required — who this data is shared with, and why)",
+        recipients_label,
         placeholder="e.g. Shared with our claims administrator to assess and settle claims, "
         "and with our reinsurer under a reinsurance treaty. No international transfers.",
         key=recipients_key,
+        label_visibility="collapsed",
     )
 
     # Never auto-matched from the disclosed tables/schemas — see
@@ -928,6 +975,7 @@ def _render_access_report_dialog() -> None:
             finally:
                 exec_client.close()
             st.session_state.sar_access_last_result = (request_id, html_report)
+            st.session_state.sar_access_auto_download = True
             for key in ("sar_access_review_tables", "sar_access_retention_df", "sar_access_comments"):
                 st.session_state.pop(key, None)
             st.rerun()
@@ -1463,6 +1511,19 @@ if "sar_access_last_result" in st.session_state:
         "Open the downloaded file in a browser tab and use Print → Save as PDF "
         "for a handoff-ready document."
     )
+    # One-shot: triggers the browser's save dialog immediately after
+    # generation, via a hidden auto-clicked download link, without needing
+    # a second manual click. Popped so it only fires once — otherwise this
+    # would re-trigger a fresh download on every later rerun (e.g. opening
+    # a different sidebar page), not just right after generating.
+    if st.session_state.pop("sar_access_auto_download", False):
+        b64_report = base64.b64encode(html_report.encode("utf-8")).decode("ascii")
+        components.html(
+            f"""<a id="dl" href="data:text/html;base64,{b64_report}"
+                  download="access-report-{request_id}.html"></a>
+               <script>document.getElementById('dl').click();</script>""",
+            height=0,
+        )
     st.download_button(
         "Download report (.html)",
         data=html_report,
