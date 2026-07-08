@@ -26,8 +26,8 @@ Nothing in the infra repo ever triggers a deploy here (its GitHub App is scoped 
 |---|---|
 | `databricks.yml` | DABs bundle config. Two `lookup:` variables resolve infra-created objects by name at deploy time: `warehouse_id` (`data_platform_admins-sql-warehouse`) and `platform_sp_id` (`sp-data-platform`, used to pin `run_as` on the governance jobs) |
 | `governance/*.sql` | Masking UDFs (`create_udfs.sql`), ABAC column-mask policies (`create_policies.sql`), audit table DDL (`create_erasure_tables.sql`, `create_access_tables.sql`, `create_lineage_cache_tables.sql`), the incremental lineage-cache MERGE (`refresh_lineage_cache.sql`), retention/freshness views |
-| `governance/*.py` | Notebook-style tasks run by `governance_daily` (`apply_auto_ttl`, `compute_freshness_metrics`) |
-| `resources/jobs/governance.yml` | `governance_setup` (runs on every deploy: UDFs → policies → erasure/access/lineage-cache tables) and `governance_daily` (scheduled, paused by default) — both pin `run_as: sp-data-platform` |
+| `governance/*.py` | Notebook-style tasks. `apply_auto_ttl`/`compute_freshness_metrics` run by `governance_daily`; `grant_sar_app_access` runs by `governance_setup` — grants the SAR app's own SP access to bronze/silver/gold and admin.* by resolving its id via the Apps API (`w.apps.get(name="platform-sar-app")`), not from the infra repo |
+| `resources/jobs/governance.yml` | `governance_setup` (runs on every deploy: UDFs → policies → erasure/access/lineage-cache tables → grant_sar_app_access) and `governance_daily` (scheduled, paused by default) — both pin `run_as: sp-data-platform` |
 | `resources/jobs/lineage_cache_refresh.yml` | Standalone job refreshing `admin.lineage_cache` — triggered by `governance_daily`'s schedule *and* on-demand by the SAR app's "Refresh lineage cache now" button (via `CAN_MANAGE_RUN`), so the MERGE logic lives in exactly one SQL file |
 | `resources/apps/sar.yml`, `apps/sar_app/` | The SAR Streamlit app — see `docs/sar-app.md` |
 | `resources/dashboards/*.yml`, `dashboards/*.lvdash.json` | Platform Data Governance and Access Audit dashboards |

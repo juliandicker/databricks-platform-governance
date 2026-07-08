@@ -58,6 +58,16 @@ resources:
             file:
               path: ${workspace.file_path}/governance/create_lineage_cache_tables.sql
 
+        - task_key: grant_sar_app_access
+          description: >
+            Grant the SAR app's own service principal access to bronze/silver/gold
+            and the admin.* schemas it needs. Owned here (not infra's Terraform)
+            since the app's SP id is only resolvable once it's deployed.
+          depends_on:
+            - task_key: create_udfs
+          notebook_task:
+            notebook_path: ${workspace.file_path}/governance/grant_sar_app_access
+
     governance_daily:
       name: platform-governance-daily
       description: >
