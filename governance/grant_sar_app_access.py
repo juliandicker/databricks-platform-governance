@@ -36,6 +36,15 @@ sp_id = w.apps.get(name="platform-sar-app").service_principal_client_id
 #
 # admin.shared: EXECUTE only — to call the two hash UDFs
 # (hash_subject_ref, hash_row_key) when writing the erasure audit trail.
+#
+# system / system.information_schema: USE CATALOG only — {catalog}.information_schema
+# .column_tags is backed by data owned by the SYSTEM catalog, so reading it (the
+# search pipeline's tag catalogue scan, and the access-report redaction review's
+# per-table tag lookup) requires USE CATALOG on system regardless of which catalog
+# it's queried from. Granted here (not to account users generally) so ordinary
+# searchers never need direct access to system tables like system.access.audit —
+# the app's own SP does the tag lookup on their behalf; the actual row search still
+# runs as the calling user so ABAC masking stays per-user.
 grants = [
     ("CATALOG bronze", ["USE_CATALOG", "USE_SCHEMA", "SELECT", "MODIFY"]),
     ("CATALOG silver", ["USE_CATALOG", "USE_SCHEMA", "SELECT", "MODIFY"]),
@@ -44,6 +53,8 @@ grants = [
     ("SCHEMA admin.access", ["SELECT", "MODIFY"]),
     ("SCHEMA admin.lineage_cache", ["SELECT"]),
     ("SCHEMA admin.shared", ["EXECUTE"]),
+    ("CATALOG system", ["USE_CATALOG"]),
+    ("SCHEMA system.information_schema", ["USE_SCHEMA"]),
 ]
 
 for securable, privileges in grants:

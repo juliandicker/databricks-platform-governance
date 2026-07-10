@@ -88,11 +88,17 @@ def get_tagged_columns(token: str, catalog: str) -> pd.DataFrame:
     """Return all ``class.*`` column tags from *catalog*.information_schema.
 
     Results are cached for 5 minutes (``ttl=300``) to avoid re-scanning the
-    information schema on every Streamlit re-run. ``token`` is included in
-    the cache key (unlike a leading-underscore param) so the tag catalogue is
-    scoped per-caller rather than shared across sessions — otherwise the
-    first user to populate the cache for a given catalog would silently
-    determine what every other user sees for up to 5 minutes.
+    information schema on every Streamlit re-run. Callers should pass the
+    app's own SP token (``get_service_principal_token()``), not the calling
+    user's — ``information_schema.column_tags`` is backed by data owned by
+    the ``SYSTEM`` catalog, so reading it needs ``USE CATALOG`` on ``system``,
+    which the app's SP has and ordinary users deliberately don't (see
+    ``governance/grant_sar_app_access.py``). This is metadata only (which
+    columns carry which tag), never subject data, so a single shared identity
+    for this lookup doesn't bypass any per-user ABAC masking — the actual row
+    search still runs on the caller's own token. ``token`` stays part of the
+    cache key so a leading-underscore param isn't needed, though in practice
+    it's now the same SP token for every caller.
     """
     return DatabricksClient(token).query(f"""
         SELECT schema_name  AS table_schema,

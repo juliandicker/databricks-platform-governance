@@ -358,9 +358,13 @@ def _run_search_pipeline(
         name_matcher = NameMatcher()
         searcher = SARSearcher(db_client, name_matcher)
 
-        # 1. Discover tagged columns
+        # 1. Discover tagged columns. Uses the app's own SP, not the caller's
+        # token — information_schema.column_tags needs USE CATALOG on system
+        # (see grant_sar_app_access.py), which ordinary users deliberately
+        # don't have. Tag metadata only, never subject data, so this doesn't
+        # bypass per-user ABAC masking on the actual row search below.
         t0 = time.perf_counter()
-        tagged_df = get_tagged_columns(token, catalog)
+        tagged_df = get_tagged_columns(get_service_principal_token(), catalog)
         _mark(timings, "Tag catalogue scan", t0)
         if tagged_df.empty:
             return {
