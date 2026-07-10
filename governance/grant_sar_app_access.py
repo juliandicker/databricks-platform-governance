@@ -62,3 +62,25 @@ for securable, privileges in grants:
     print(f"[OK] {securable}: {privileges}")
 
 print(f"\nGranted SAR app SP ({sp_id}) access to {len(grants)} securable(s)")
+
+# COMMAND ----------
+
+# CAN_USE on the platform SQL warehouse — also declared as an app resource in
+# resources/apps/sar.yml, but that binding isn't reliably applied by `bundle
+# deploy` on a freshly created app (confirmed missing from the warehouse's own
+# ACL on a fresh workspace even though the app resource declared it, breaking
+# every SP-token query — e.g. database.get_tagged_columns). Granted here too,
+# via the same idempotent SDK path as everything else in this notebook, so a
+# fresh workspace doesn't need a manual `databricks permissions update` to
+# unblock search.
+from databricks.sdk.service.iam import AccessControlRequest, PermissionLevel
+
+warehouse = next(wh for wh in w.warehouses.list() if wh.name == "data_platform_admins-sql-warehouse")
+w.permissions.update(
+    request_object_type="warehouses",
+    request_object_id=warehouse.id,
+    access_control_list=[
+        AccessControlRequest(service_principal_name=sp_id, permission_level=PermissionLevel.CAN_USE),
+    ],
+)
+print(f"[OK] SQL warehouse {warehouse.name} ({warehouse.id}): CAN_USE")
